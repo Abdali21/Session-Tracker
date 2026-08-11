@@ -1,42 +1,31 @@
 import { Calendar } from "lucide-react";
-import { AppHeader } from "@/components/app-header";
-import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { AppShell } from "@/components/app-shell";
 
 export default function Loading() {
   return (
-    <div className="flex min-h-screen flex-1 flex-col bg-background">
-      <AppHeader activePage="today" />
-
-      <main className="mx-auto w-full max-w-[1440px] flex-1 px-8 py-7">
-        <div className="flex flex-col gap-6" aria-busy="true" aria-live="polite">
-          <div className="border-b border-border pb-5">
-            <div className="mb-1.5 flex items-center gap-1.5 text-muted-foreground">
-              <Calendar className="size-3.5" />
-              <div className="h-3 w-40 animate-pulse rounded-sm bg-muted" />
-            </div>
-            <div className="h-8 w-56 animate-pulse rounded-sm bg-muted" />
+    <AppShell activePage="today">
+      <div className="space-y-8" aria-busy="true" aria-live="polite">
+        <header className="border-b border-[#DEE2EA] pb-7">
+          <div className="mb-2.5 flex items-center gap-2 text-text-muted">
+            <Calendar className="size-4" />
+            <div className="h-4 w-40 animate-pulse rounded bg-[#E7E9EF]" />
           </div>
+          <div className="h-[42px] w-64 animate-pulse rounded-md bg-[#E7E9EF]" />
+        </header>
 
-          <div className="grid grid-cols-3 items-start gap-4">
+        <div className="mx-auto w-full max-w-[940px] space-y-5">
+          <div className="grid grid-cols-3 gap-3">
             {Array.from({ length: 3 }, (_, index) => (
-              <Card key={index} className="h-80 animate-pulse gap-0 py-0">
-                <CardHeader className="border-b border-border/80 bg-muted/15 px-5 py-4">
-                  <div className="h-5 w-36 rounded-sm bg-muted" />
-                  <div className="h-4 w-44 rounded-sm bg-muted" />
-                </CardHeader>
-                <CardContent className="space-y-4 px-5 py-4">
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="h-9 rounded-sm bg-muted" />
-                    <div className="h-9 rounded-sm bg-muted" />
-                  </div>
-                  <div className="h-24 rounded-sm bg-muted" />
-                </CardContent>
-              </Card>
+              <div
+                key={index}
+                className="h-12 animate-pulse rounded-xl border border-[#E1E5EC] bg-white"
+              />
             ))}
           </div>
-          <span className="sr-only">Loading today&apos;s sessions</span>
+          <div className="h-[640px] animate-pulse rounded-2xl border border-[#DEE2EA] bg-white shadow-[0_12px_32px_rgba(23,27,44,0.04)]" />
         </div>
-      </main>
-    </div>
+        <span className="sr-only">Loading today&apos;s sessions</span>
+      </div>
+    </AppShell>
   );
 }

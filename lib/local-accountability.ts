@@ -1,7 +1,7 @@
 import {
+  calculateLateMinutes,
+  formatTime,
   getSessionLabel,
-  getSessionTimeline,
-  hasSessionWindowEnded,
   todayDateString,
 } from "@/lib/session";
 import {
@@ -13,12 +13,14 @@ import {
 import {
   type Session,
   type SessionType,
+  SESSION_SCHEDULE,
   SESSION_TYPES,
 } from "@/types/session";
 
 const ACCOUNTABILITY_STORAGE_KEY_PREFIX =
   "work-session-tracker:accountability:";
-const ACCOUNTABILITY_STORAGE_VERSION = 1;
+const ACCOUNTABILITY_STORAGE_VERSION = 3;
+const LEGACY_ACCOUNTABILITY_STORAGE_VERSIONS = new Set([1, 2]);
 const ACCOUNTABILITY_CHANGED_EVENT =
   "work-session-tracker:accountability-changed";
 const VIOLATION_TYPE_SET = new Set<AccountabilityViolationType>(
@@ -123,12 +125,12 @@ export function createAccountabilityStore(date: string): AccountabilityStore {
       const day = getSnapshot();
       if (day.activatedAt === null) return;
 
-      const additions = buildCurrentViolations(day, sessions, now);
-      if (additions.length === 0) return;
+      const violations = reconcileCurrentViolations(day, sessions, now);
+      if (violationsEqual(day.violations, violations)) return;
 
       writeLocalDay({
         ...day,
-        violations: sortViolations([...day.violations, ...additions]),
+        violations,
       });
     },
     recordDistraction(session, now = new Date()) {
@@ -139,20 +141,19 @@ export function createAccountabilityStore(date: string): AccountabilityStore {
         day.activatedAt === null
           ? { ...day, activatedAt: now.toISOString() }
           : day;
-      const violation = createViolation(
-        session,
-        "distracted",
-        "Got distracted during session",
-        `I allowed myself to get distracted during ${getSessionLabel(
-          session.sessionType
-        )}.`,
-        now
+      const violation = preserveViolationState(
+        createDistractionViolation(session, now),
+        activeDay.violations
       );
-      if (activeDay.violations.some(({ id }) => id === violation.id)) return;
+      const violations = sortViolations([
+        ...activeDay.violations.filter(({ id }) => id !== violation.id),
+        violation,
+      ]);
+      if (violationsEqual(activeDay.violations, violations)) return;
 
       writeLocalDay({
         ...activeDay,
-        violations: sortViolations([...activeDay.violations, violation]),
+        violations,
       });
     },
     removeDistraction(sessionType) {
@@ -265,117 +266,111 @@ export function setAccountabilityPageCompleted(
   updateViolationCompletion(date, violationId, completed);
 }
 
-function buildCurrentViolations(
+function reconcileCurrentViolations(
   day: AccountabilityDay,
   sessions: Session[],
   now: Date
 ): AccountabilityViolation[] {
-  const additions: AccountabilityViolation[] = [];
-  const knownIds = new Set(day.violations.map(({ id }) => id));
-
-  function add(violation: AccountabilityViolation) {
-    if (knownIds.has(violation.id)) return;
-    knownIds.add(violation.id);
-    additions.push(violation);
-  }
+  const violations: AccountabilityViolation[] = [];
 
   sessions.forEach((session) => {
     if (session.date !== day.date) return;
 
-    const timeline = getSessionTimeline(session);
-    if (
-      timeline.startDifferenceMinutes !== null &&
-      timeline.startDifferenceMinutes > 0
-    ) {
-      add(
-        createViolation(
-          session,
-          "late_start",
-          `Started ${formatDifference(
-            timeline.startDifferenceMinutes
-          )} late`,
-          `I started my ${getSessionLabel(session.sessionType)} session late.`,
-          now
-        )
-      );
-    }
-
-    if (
-      session.status === "completed" &&
-      timeline.finishDifferenceMinutes !== null &&
-      timeline.finishDifferenceMinutes < 0
-    ) {
-      add(
-        createViolation(
-          session,
-          "finished_early",
-          `Finished ${formatDifference(
-            Math.abs(timeline.finishDifferenceMinutes)
-          )} early`,
-          `I finished my ${getSessionLabel(
-            session.sessionType
-          )} session before the planned end.`,
-          now
+    const lateByMinutes = calculateLateMinutes(session);
+    if (lateByMinutes !== null && lateByMinutes > 0) {
+      violations.push(
+        preserveViolationState(
+          createLateStartViolation(session, lateByMinutes, now),
+          day.violations
         )
       );
     }
 
     if (session.distracted) {
-      add(
-        createViolation(
-          session,
-          "distracted",
-          "Got distracted during session",
-          `I allowed myself to get distracted during ${getSessionLabel(
-            session.sessionType
-          )}.`,
-          now
+      violations.push(
+        preserveViolationState(
+          createDistractionViolation(session, now),
+          day.violations
         )
       );
     }
 
-    if (!hasSessionWindowEnded(session, now)) return;
-
-    const missedId = getAccountabilityViolationId(
-      day.date,
-      session.sessionType,
-      "missed_session"
-    );
-    const incompleteId = getAccountabilityViolationId(
-      day.date,
-      session.sessionType,
-      "incomplete_session"
-    );
-    if (knownIds.has(missedId) || knownIds.has(incompleteId)) return;
-
-    if (session.status === "not_started" || session.status === "skipped") {
-      add(
-        createViolation(
-          session,
-          "missed_session",
-          "Session not started",
-          `I did not complete my ${getSessionLabel(
-            session.sessionType
-          )} session today.`,
-          now
-        )
-      );
-    } else if (session.status === "in_progress") {
-      add(
-        createViolation(
-          session,
-          "incomplete_session",
-          "Session started but not completed",
-          `I did not complete my ${getSessionLabel(
-            session.sessionType
-          )} session properly.`,
-          now
+    if (session.status === "missed") {
+      violations.push(
+        preserveViolationState(
+          createMissedSessionViolation(session, now),
+          day.violations
         )
       );
     }
   });
 
-  return additions;
+  return sortViolations(violations);
+}
+
+function createLateStartViolation(
+  session: Session,
+  lateByMinutes: number,
+  now: Date
+): AccountabilityViolation {
+  const schedule = SESSION_SCHEDULE[session.sessionType];
+  const difference = formatDifference(lateByMinutes);
+
+  return createViolation(
+    session,
+    "started_late",
+    [
+      `Official Start: ${formatClockTime(schedule.plannedStart)}`,
+      `Actual Start: ${formatTime(session.startedAt)}`,
+      `Late By: ${difference}`,
+    ].join("\n"),
+    `I started my ${getSessionLabel(
+      session.sessionType
+    )} session ${formatMinutesForSentence(lateByMinutes)} late.`,
+    now
+  );
+}
+
+function createDistractionViolation(
+  session: Session,
+  now: Date
+): AccountabilityViolation {
+  const reason = session.distractionReason?.trim();
+
+  return createViolation(
+    session,
+    "distracted",
+    reason ? `Reason:\n${reason}` : "",
+    `I got distracted during my ${getSessionLabel(session.sessionType)} session.`,
+    now
+  );
+}
+
+function createMissedSessionViolation(
+  session: Session,
+  now: Date
+): AccountabilityViolation {
+  return createViolation(
+    session,
+    "missed_session",
+    "Session status: Missed",
+    `I missed my ${getSessionLabel(session.sessionType)} session today.`,
+    now
+  );
+}
+
+function preserveViolationState(
+  violation: AccountabilityViolation,
+  existingViolations: AccountabilityViolation[]
+): AccountabilityViolation {
+  const existing = existingViolations.find(({ id }) => id === violation.id);
+  return existing
+    ? {
+        ...violation,
+        pageCompleted: existing.pageCompleted,
+        createdAt: existing.createdAt,
+      }
+    : violation;
 }
 
 function createViolation(
@@ -451,7 +446,10 @@ function parseAccountabilityDay(
     const parsed: unknown = JSON.parse(raw);
     if (
       !isRecord(parsed) ||
-      parsed.version !== ACCOUNTABILITY_STORAGE_VERSION ||
+      (parsed.version !== ACCOUNTABILITY_STORAGE_VERSION &&
+        !LEGACY_ACCOUNTABILITY_STORAGE_VERSIONS.has(
+          typeof parsed.version === "number" ? parsed.version : -1
+        )) ||
       !Array.isArray(parsed.violations)
     ) {
       return emptyDay(date);
@@ -462,8 +460,10 @@ function parseAccountabilityDay(
       activatedAt:
         typeof parsed.activatedAt === "string" ? parsed.activatedAt : null,
       violations: sortViolations(
-        parsed.violations.flatMap((violation) =>
-          normalizeViolation(violation, date)
+        deduplicateViolations(
+          parsed.violations.flatMap((violation) =>
+            normalizeViolation(violation, date)
+          )
         )
       ),
     };
@@ -483,7 +483,6 @@ function normalizeViolation(
     typeof value.sessionType !== "string" ||
     !SESSION_TYPE_SET.has(value.sessionType as SessionType) ||
     typeof value.type !== "string" ||
-    !VIOLATION_TYPE_SET.has(value.type as AccountabilityViolationType) ||
     typeof value.details !== "string" ||
     typeof value.pageInstruction !== "string" ||
     typeof value.pageCompleted !== "boolean" ||
@@ -493,13 +492,19 @@ function normalizeViolation(
   }
 
   const sessionType = value.sessionType as SessionType;
-  const type = value.type as AccountabilityViolationType;
-  if (value.id !== getAccountabilityViolationId(date, sessionType, type)) {
+  const type = normalizeViolationType(value.type);
+  if (type === null) return [];
+
+  const legacyId = `${date}:${sessionType}:${value.type}`;
+  if (
+    value.id !== getAccountabilityViolationId(date, sessionType, type) &&
+    value.id !== legacyId
+  ) {
     return [];
   }
 
   return [{
-    id: value.id,
+    id: getAccountabilityViolationId(date, sessionType, type),
     date,
     sessionType,
     type,
@@ -508,6 +513,15 @@ function normalizeViolation(
     pageCompleted: value.pageCompleted,
     createdAt: value.createdAt,
   }];
+}
+
+function normalizeViolationType(
+  value: string
+): AccountabilityViolationType | null {
+  if (value === "late_start") return "started_late";
+  return VIOLATION_TYPE_SET.has(value as AccountabilityViolationType)
+    ? (value as AccountabilityViolationType)
+    : null;
 }
 
 function sortViolations(
@@ -526,6 +540,31 @@ function sortViolations(
   });
 }
 
+function deduplicateViolations(
+  violations: AccountabilityViolation[]
+): AccountabilityViolation[] {
+  const unique = new Map<string, AccountabilityViolation>();
+
+  violations.forEach((violation) => {
+    const existing = unique.get(violation.id);
+    if (!existing) {
+      unique.set(violation.id, violation);
+      return;
+    }
+
+    unique.set(violation.id, {
+      ...violation,
+      pageCompleted: existing.pageCompleted || violation.pageCompleted,
+      createdAt:
+        existing.createdAt < violation.createdAt
+          ? existing.createdAt
+          : violation.createdAt,
+    });
+  });
+
+  return [...unique.values()];
+}
+
 function formatDifference(totalMinutes: number): string {
   const minutes = Math.max(0, Math.round(totalMinutes));
   if (minutes < 60) return `${minutes}m`;
@@ -535,6 +574,25 @@ function formatDifference(totalMinutes: number): string {
   return remainingMinutes === 0
     ? `${hours}h`
     : `${hours}h ${remainingMinutes}m`;
+}
+
+function formatMinutesForSentence(totalMinutes: number): string {
+  const minutes = Math.max(0, Math.round(totalMinutes));
+  return `${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
+}
+
+function formatClockTime(time: string): string {
+  const [hour, minute] = time.split(":").map(Number);
+  const period = hour >= 12 ? "PM" : "AM";
+  const displayHour = hour % 12 || 12;
+  return `${displayHour}:${String(minute).padStart(2, "0")} ${period}`;
+}
+
+function violationsEqual(
+  left: AccountabilityViolation[],
+  right: AccountabilityViolation[]
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function emptyDay(date: string): AccountabilityDay {

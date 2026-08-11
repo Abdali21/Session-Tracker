@@ -2,23 +2,29 @@
 
 import { useMemo, useState, useSyncExternalStore } from "react";
 import { Calendar } from "lucide-react";
-import { AppHeader } from "@/components/app-header";
+import { AppShell } from "@/components/app-shell";
+import { PageHeader } from "@/components/page-header";
 import { SessionCard } from "@/components/session-card";
+import { SessionTabs } from "@/components/session-tabs";
 import {
   createAccountabilityStore,
   getAccountabilityViolationId,
 } from "@/lib/local-accountability";
 import { createDailySessionStore } from "@/lib/local-sessions";
 import {
+  completeSessionTask,
+  correctActualSessionTime,
+  finalizeRunningTaskAtSessionEnd,
   formatTodayDate,
-  getDefaultFinishTarget,
-  getFinishTargetValidationError,
-  getSessionLabel,
+  getUndoStartConfirmation,
   getSessionTimeValidationError,
+  startSessionTask,
   todayDateString,
+  undoSessionStart,
 } from "@/lib/session";
 import type { Session, SessionTask, SessionType } from "@/types/session";
 import { useAccountabilityReconciliation } from "@/lib/use-accountability-reconciliation";
+import { useSessionTiming } from "@/lib/use-session-timing";
 
 const subscribeToNothing = () => () => {};
 
@@ -26,6 +32,9 @@ export default function Home() {
   const [selectedSessionType, setSelectedSessionType] =
     useState<SessionType>("skill_mastery");
   const [sessionErrors, setSessionErrors] = useState<
+    Partial<Record<SessionType, string>>
+  >({});
+  const [taskErrors, setTaskErrors] = useState<
     Partial<Record<SessionType, string>>
   >({});
   const isClient = useSyncExternalStore(
@@ -44,6 +53,7 @@ export default function Home() {
     store.getSnapshot,
     store.getServerSnapshot
   );
+  const timingNow = useSessionTiming(store, sessions);
   useAccountabilityReconciliation(accountabilityStore, sessions);
   const currentDate = isClient ? formatTodayDate() : "";
   const selectedSession =
@@ -66,7 +76,7 @@ export default function Home() {
     const session = sessions.find(
       (currentSession) => currentSession.sessionType === sessionType
     );
-    if (!session || session.status !== "not_started") return;
+    if (!session || session.status !== "upcoming") return;
 
     const now = new Date();
     const validationError = getSessionTimeValidationError(
@@ -84,12 +94,12 @@ export default function Home() {
 
     setSessionErrors((current) => ({ ...current, [sessionType]: undefined }));
     updateSession(sessionType, (session) =>
-      session.status === "not_started"
+      session.status === "upcoming"
         ? {
             ...session,
             startedAt: now.toISOString(),
-            finishTarget: getDefaultFinishTarget(session.sessionType),
-            status: "in_progress",
+            finishTarget: null,
+            status: "running",
           }
         : session
     );
@@ -99,7 +109,7 @@ export default function Home() {
     const session = sessions.find(
       (currentSession) => currentSession.sessionType === sessionType
     );
-    if (!session || session.status !== "in_progress") return;
+    if (!session || session.status !== "running") return;
 
     const now = new Date();
     const validationError = getSessionTimeValidationError(
@@ -117,38 +127,54 @@ export default function Home() {
 
     setSessionErrors((current) => ({ ...current, [sessionType]: undefined }));
     updateSession(sessionType, (session) =>
-      session.status === "in_progress"
-        ? {
+      session.status === "running"
+        ? finalizeRunningTaskAtSessionEnd({
             ...session,
             finishedAt: now.toISOString(),
             status: "completed",
-          }
+          }, now)
         : session
     );
+    setTaskErrors((current) => ({ ...current, [sessionType]: undefined }));
   }
 
-  function setFinishTarget(sessionType: SessionType, finishTarget: string) {
+  function correctSessionTime(
+    sessionType: SessionType,
+    field: "start" | "finish",
+    clockTime: string
+  ): string | null {
+    let error: string | null = null;
+    updateSession(sessionType, (session) => {
+      const result = correctActualSessionTime(session, field, clockTime);
+      error = result.error;
+      return result.session;
+    });
+    return error;
+  }
+
+  function undoStart(sessionType: SessionType) {
     const session = sessions.find(
       (currentSession) => currentSession.sessionType === sessionType
     );
-    if (!session || session.status !== "in_progress") return;
-
-    const validationError = getFinishTargetValidationError(
-      session,
-      finishTarget
-    );
-    if (validationError) {
-      setSessionErrors((current) => ({
-        ...current,
-        [sessionType]: validationError,
-      }));
+    if (
+      !session ||
+      session.status !== "running" ||
+      !window.confirm(getUndoStartConfirmation(session))
+    ) {
       return;
     }
 
-    setSessionErrors((current) => ({ ...current, [sessionType]: undefined }));
-    updateSession(sessionType, (currentSession) => ({
-      ...currentSession,
-      finishTarget,
+    updateSession(sessionType, (currentSession) =>
+      undoSessionStart(currentSession)
+    );
+    accountabilityStore.removeDistraction(sessionType);
+    setSessionErrors((current) => ({
+      ...current,
+      [sessionType]: undefined,
+    }));
+    setTaskErrors((current) => ({
+      ...current,
+      [sessionType]: undefined,
     }));
   }
 
@@ -161,7 +187,8 @@ export default function Home() {
     );
     if (
       !session ||
-      session.status === "not_started" ||
+      session.status === "upcoming" ||
+      session.status === "missed" ||
       session.status === "skipped"
     ) {
       return;
@@ -189,6 +216,9 @@ export default function Home() {
     updateSession(sessionType, (currentSession) => ({
       ...currentSession,
       distracted,
+      distractionReason: distracted
+        ? currentSession.distractionReason
+        : null,
     }));
 
     if (distracted) {
@@ -198,15 +228,30 @@ export default function Home() {
     }
   }
 
+  function setDistractionReason(
+    sessionType: SessionType,
+    distractionReason: string
+  ) {
+    updateSession(sessionType, (session) => ({
+      ...session,
+      distractionReason:
+        session.distracted === true ? distractionReason : null,
+    }));
+  }
+
   function addTask(sessionType: SessionType, title: string) {
     const trimmedTitle = title.trim();
     if (!trimmedTitle) return;
 
+    const timestamp = new Date().toISOString();
     const task: SessionTask = {
       id: crypto.randomUUID(),
       title: trimmedTitle,
-      completed: false,
-      createdAt: new Date().toISOString(),
+      status: "pending",
+      startedAt: null,
+      finishedAt: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
     };
 
     updateSession(sessionType, (session) => ({
@@ -215,16 +260,31 @@ export default function Home() {
     }));
   }
 
-  function setTaskCompleted(
-    sessionType: SessionType,
-    taskId: string,
-    completed: boolean
-  ) {
-    updateSession(sessionType, (session) => ({
-      ...session,
-      tasks: session.tasks.map((task) =>
-        task.id === taskId ? { ...task, completed } : task
-      ),
+  function startTask(sessionType: SessionType, taskId: string) {
+    const now = new Date();
+    let error: string | null = null;
+    updateSession(sessionType, (session) => {
+      const result = startSessionTask(session, taskId, now);
+      error = result.error;
+      return result.session;
+    });
+    setTaskErrors((current) => ({
+      ...current,
+      [sessionType]: error ?? undefined,
+    }));
+  }
+
+  function completeTask(sessionType: SessionType, taskId: string) {
+    const now = new Date();
+    let error: string | null = null;
+    updateSession(sessionType, (session) => {
+      const result = completeSessionTask(session, taskId, now);
+      error = result.error;
+      return result.session;
+    });
+    setTaskErrors((current) => ({
+      ...current,
+      [sessionType]: error ?? undefined,
     }));
   }
 
@@ -236,83 +296,61 @@ export default function Home() {
   }
 
   return (
-    <div className="flex min-h-screen flex-1 flex-col bg-background">
-      <AppHeader activePage="today" />
+    <AppShell activePage="today">
+      <div className="space-y-8">
+        <PageHeader
+          title="Today's Sessions"
+          eyebrow={currentDate}
+          icon={Calendar}
+        />
 
-      <main className="mx-auto w-full max-w-[1440px] flex-1 px-8 py-7">
-        <div className="flex flex-col gap-6">
-          <div className="border-b border-border pb-5">
-            <div className="mb-1.5 flex items-center gap-1.5 text-text-muted">
-              <Calendar className="size-3.5" />
-              <span className="text-[12px] font-medium">{currentDate}</span>
-            </div>
-            <h1 className="text-[28px] font-semibold leading-8">
-              Today&apos;s Sessions
-            </h1>
-          </div>
+        <div className="mx-auto w-full max-w-[940px] space-y-5">
+          <SessionTabs
+            sessions={sessions}
+            selectedSessionType={selectedSessionType}
+            onSelect={setSelectedSessionType}
+          />
 
-          <div className="mx-auto w-full max-w-[760px] space-y-4">
+          {selectedSession ? (
             <div
-              className="grid grid-cols-3 gap-3"
-              role="group"
-              aria-label="Daily sessions"
+              id="selected-session-panel"
+              role="tabpanel"
+              aria-labelledby={`session-tab-${selectedSession.sessionType}`}
             >
-              {sessions.map((session) => {
-                const isSelected =
-                  session.sessionType === selectedSessionType;
-
-                return (
-                  <button
-                    key={session.id}
-                    id={`session-tab-${session.sessionType}`}
-                    type="button"
-                    aria-pressed={isSelected}
-                    aria-expanded={isSelected}
-                    aria-controls="selected-session-panel"
-                    onClick={() =>
-                      setSelectedSessionType(session.sessionType)
-                    }
-                    className={`h-11 rounded-lg border px-4 text-[14px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-brand/20 ${
-                      isSelected
-                        ? "border-[#2D2D83] bg-[#2D2D83] text-white shadow-[0_4px_12px_rgba(45,45,131,0.16)]"
-                        : "border-border bg-card text-foreground hover:border-[#8079AF] hover:bg-card"
-                    }`}
-                  >
-                    {getSessionLabel(session.sessionType)}
-                  </button>
-                );
-              })}
-            </div>
-
-            {selectedSession && (
-              <div
-                id="selected-session-panel"
-                role="region"
-                aria-labelledby={`session-tab-${selectedSession.sessionType}`}
-              >
                 <SessionCard
                   key={selectedSession.id}
                   session={selectedSession}
+                  timestamp={timingNow ?? undefined}
                   onStart={() => startSession(selectedSession.sessionType)}
                   onFinish={() => finishSession(selectedSession.sessionType)}
                   onAddTask={(title) =>
                     addTask(selectedSession.sessionType, title)
                   }
-                  onTaskCompletedChange={(taskId, completed) =>
-                    setTaskCompleted(
-                      selectedSession.sessionType,
-                      taskId,
-                      completed
-                    )
+                  onStartTask={(taskId) =>
+                    startTask(selectedSession.sessionType, taskId)
+                  }
+                  onCompleteTask={(taskId) =>
+                    completeTask(selectedSession.sessionType, taskId)
                   }
                   onDeleteTask={(taskId) =>
                     deleteTask(selectedSession.sessionType, taskId)
                   }
-                  onFinishTargetChange={(finishTarget) =>
-                    setFinishTarget(
+                  onActualStartChange={(clockTime) =>
+                    correctSessionTime(
                       selectedSession.sessionType,
-                      finishTarget
+                      "start",
+                      clockTime
                     )
+                  }
+                  onActualFinishChange={(clockTime) =>
+                    correctSessionTime(
+                      selectedSession.sessionType,
+                      "finish",
+                      clockTime
+                    )
+                  }
+                  onUndoStart={() =>
+                    undoStart(selectedSession.sessionType)
                   }
                   onDistractedChange={(distracted) =>
                     setSessionDistracted(
@@ -320,13 +358,19 @@ export default function Home() {
                       distracted
                     )
                   }
+                  onDistractionReasonChange={(reason) =>
+                    setDistractionReason(
+                      selectedSession.sessionType,
+                      reason
+                    )
+                  }
                   actionError={sessionErrors[selectedSession.sessionType]}
+                  taskError={taskErrors[selectedSession.sessionType]}
                 />
-              </div>
-            )}
-          </div>
+            </div>
+          ) : null}
         </div>
-      </main>
-    </div>
+      </div>
+    </AppShell>
   );
 }

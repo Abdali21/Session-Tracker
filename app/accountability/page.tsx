@@ -1,9 +1,10 @@
 "use client";
 
 import { useMemo, useSyncExternalStore } from "react";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, ClipboardCheck } from "lucide-react";
 import { AccountabilityViolationCard } from "@/components/accountability-violation-card";
-import { AppHeader } from "@/components/app-header";
+import { AppShell } from "@/components/app-shell";
+import { PageHeader } from "@/components/page-header";
 import {
   createAccountabilityHistoryStore,
   createAccountabilityStore,
@@ -56,35 +57,30 @@ export default function AccountabilityPage() {
   ];
 
   return (
-    <div className="flex min-h-screen flex-1 flex-col bg-background">
-      <AppHeader activePage="accountability" />
+    <AppShell activePage="accountability">
+      <div className="space-y-8">
+        <PageHeader
+          title="Accountability"
+          eyebrow="Execution corrections"
+          description="One broken commitment = one handwritten page."
+          icon={ClipboardCheck}
+        />
 
-      <main className="mx-auto w-full max-w-[1440px] flex-1 px-8 py-7">
-        <div className="flex flex-col gap-6">
-          <div className="border-b border-border pb-5">
-            <h1 className="text-[28px] font-semibold leading-8">
-              Accountability
-            </h1>
-            <p className="mt-1.5 text-[14px] text-text-secondary">
-              One broken commitment = one handwritten page.
-            </p>
-          </div>
-
-          <div className="mx-auto w-full max-w-[1040px] space-y-7">
+          <div className="space-y-9">
             <section aria-labelledby="today-accountability-heading">
               <h2
                 id="today-accountability-heading"
-                className="mb-3 text-[17px] font-semibold"
+                className="mb-4 text-[20px] font-bold text-[#202536]"
               >
                 Today&apos;s Accountability
               </h2>
-              <dl className="grid grid-cols-4 divide-x divide-border overflow-hidden rounded-lg border border-border bg-card">
+              <dl className="grid grid-cols-4 divide-x divide-[#E3E6ED] overflow-hidden rounded-2xl border border-[#DEE2EA] bg-white shadow-[0_10px_28px_rgba(23,27,44,0.04)]">
                 {summary.map((metric) => (
-                  <div key={metric.label} className="px-5 py-4">
-                    <dt className="text-[12px] font-medium text-text-secondary">
+                  <div key={metric.label} className="px-7 py-5">
+                    <dt className="text-[13px] font-semibold text-[#7D8698]">
                       {metric.label}
                     </dt>
-                    <dd className="mt-1 text-[22px] font-semibold leading-7 tabular-nums">
+                    <dd className="mt-2 text-[26px] font-bold leading-8 tabular-nums text-[#202536]">
                       {metric.value}
                     </dd>
                   </div>
@@ -92,7 +88,7 @@ export default function AccountabilityPage() {
               </dl>
 
               {accountability.violations.length > 0 ? (
-                <div className="mt-4 grid grid-cols-2 items-start gap-4">
+                <div className="mt-5 grid grid-cols-1 items-start gap-5 min-[1180px]:grid-cols-2">
                   {accountability.violations.map((violation) => (
                     <AccountabilityViolationCard
                       key={violation.id}
@@ -107,48 +103,48 @@ export default function AccountabilityPage() {
                   ))}
                 </div>
               ) : (
-                <p className="mt-4 rounded-lg border border-border bg-card px-5 py-8 text-[14px] text-text-muted">
+                <p className="mt-5 rounded-2xl border border-[#DEE2EA] bg-white px-6 py-10 text-center text-[15px] text-[#8A92A3] shadow-[0_8px_24px_rgba(23,27,44,0.035)]">
                   No accountability violations today.
                 </p>
               )}
             </section>
 
             <section
-              className="border-t border-border pt-6"
+              className="border-t border-[#DEE2EA] pt-8"
               aria-labelledby="past-accountability-heading"
             >
               <h2
                 id="past-accountability-heading"
-                className="mb-3 text-[17px] font-semibold"
+                className="mb-4 text-[20px] font-bold text-[#202536]"
               >
                 Past Accountability
               </h2>
 
               {pastDays.length > 0 ? (
-                <div className="divide-y divide-border border-y border-border">
+                <div className="overflow-hidden rounded-2xl border border-[#DEE2EA] bg-white shadow-[0_8px_24px_rgba(23,27,44,0.035)]">
                   {pastDays.map((day) => {
                     const completed = day.violations.filter(
                       ({ pageCompleted }) => pageCompleted
                     ).length;
 
                     return (
-                      <details key={day.date} className="group">
-                        <summary className="flex cursor-pointer list-none items-center justify-between gap-6 py-4 text-[14px] marker:hidden">
+                      <details key={day.date} className="group border-b border-[#E8EAF0] last:border-0">
+                        <summary className="flex cursor-pointer list-none items-center justify-between gap-6 px-6 py-5 text-[14px] marker:hidden transition-colors duration-150 hover:bg-[#FAFBFC]">
                           <div>
-                            <span className="font-semibold">
+                            <span className="font-bold text-[#343A4C]">
                               {formatHistoryDate(day.date)}
                             </span>
-                            <span className="ml-4 text-[12px] font-medium text-text-muted">
+                            <span className="ml-5 text-[13px] font-semibold text-text-muted">
                               Violations: {day.violations.length}
                             </span>
-                            <span className="ml-4 text-[12px] font-medium tabular-nums text-text-muted">
+                            <span className="ml-5 text-[13px] font-semibold tabular-nums text-text-muted">
                               Pages completed: {completed} /{" "}
                               {day.violations.length}
                             </span>
                           </div>
                           <ChevronDown className="size-4 text-text-muted transition-transform group-open:rotate-180" />
                         </summary>
-                        <div className="grid grid-cols-2 items-start gap-4 pb-5">
+                        <div className="grid grid-cols-1 items-start gap-5 border-t border-[#E8EAF0] bg-[#FAFBFC] p-5 min-[1180px]:grid-cols-2">
                           {day.violations.map((violation) => (
                             <AccountabilityViolationCard
                               key={violation.id}
@@ -168,14 +164,13 @@ export default function AccountabilityPage() {
                   })}
                 </div>
               ) : (
-                <p className="py-5 text-[14px] text-text-muted">
+                <p className="rounded-2xl border border-[#DEE2EA] bg-white px-6 py-9 text-center text-[15px] text-text-muted">
                   No previous accountability records yet.
                 </p>
               )}
             </section>
-          </div>
         </div>
-      </main>
-    </div>
+      </div>
+    </AppShell>
   );
 }

@@ -27,8 +27,8 @@ export function TaskForm({ onAddTask }: TaskFormProps) {
   }
 
   return (
-    <form onSubmit={handleSubmit} className="mt-3 space-y-2">
-      <div className="flex overflow-hidden rounded-md border border-input bg-white transition-shadow focus-within:border-brand focus-within:ring-2 focus-within:ring-brand/15">
+    <form onSubmit={handleSubmit} className="mt-4 space-y-2">
+      <div className="flex overflow-hidden rounded-[10px] border border-input bg-white transition-shadow focus-within:border-brand focus-within:ring-3 focus-within:ring-brand/15">
         <Input
           name="title"
           type="text"
@@ -37,13 +37,13 @@ export function TaskForm({ onAddTask }: TaskFormProps) {
           value={title}
           onChange={(event) => setTitle(event.target.value)}
           required
-          className="h-8 rounded-none border-0 px-2.5 text-[14px] font-normal shadow-none focus-visible:ring-0"
+          className="h-11 rounded-none border-0 px-3.5 text-[14px] font-normal shadow-none focus-visible:ring-0"
         />
         <Button
           type="submit"
           variant="ghost"
           size="sm"
-          className="h-8 rounded-none border-l border-[#513FB0] bg-white px-3 text-[14px] font-medium text-[#513FB0] hover:bg-[#F4F2FB] hover:text-[#413890]"
+          className="h-11 rounded-none border-l border-[#D3D0EA] bg-white px-5 text-[14px] font-semibold text-brand hover:bg-[#F4F2FB] hover:text-brand-mid"
         >
           Add
         </Button>

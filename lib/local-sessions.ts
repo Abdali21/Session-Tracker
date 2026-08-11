@@ -2,30 +2,33 @@ import {
   type Session,
   type SessionStatus,
   type SessionTask,
+  type SessionTaskStatus,
   type SessionType,
   SESSION_TYPES,
 } from "@/types/session";
+import { resolveExpiredSessions } from "@/lib/session";
 
 const STORAGE_KEY_PREFIX = "work-session-tracker:daily-sessions:";
-const REPORT_STORAGE_KEY_PREFIX = "work-session-tracker:daily-report:";
-const STORAGE_VERSION = 1;
+const STORAGE_VERSION = 2;
+const LEGACY_STORAGE_VERSION = 1;
 const LOCAL_SESSIONS_CHANGED_EVENT =
   "work-session-tracker:local-sessions-changed";
 const SESSION_STATUSES = new Set<SessionStatus>([
-  "not_started",
-  "in_progress",
+  "upcoming",
+  "running",
   "completed",
+  "missed",
   "skipped",
+]);
+const TASK_STATUSES = new Set<SessionTaskStatus>([
+  "pending",
+  "running",
+  "completed",
 ]);
 
 interface StoredDailySessions {
   version: typeof STORAGE_VERSION;
   sessions: Session[];
-}
-
-interface StoredDailyReport {
-  version: typeof STORAGE_VERSION;
-  deepWorkMinutes: number;
 }
 
 export interface HistoryDay {
@@ -38,19 +41,14 @@ export interface DailySessionStore {
   getServerSnapshot: () => Session[];
   subscribe: (listener: () => void) => () => void;
   update: (updater: (sessions: Session[]) => Session[]) => void;
+  reconcileExpiredSessions: (timestamp?: Date) => boolean;
 }
 
 export interface HistoryStore {
   getSnapshot: () => HistoryDay[];
   getServerSnapshot: () => HistoryDay[];
   subscribe: (listener: () => void) => () => void;
-}
-
-export interface DailyReportStore {
-  getSnapshot: () => number;
-  getServerSnapshot: () => number;
-  subscribe: (listener: () => void) => () => void;
-  setDeepWorkMinutes: (minutes: number) => void;
+  reconcileExpiredSessions: (timestamp?: Date) => boolean;
 }
 
 export function createDailySessionStore(date: string): DailySessionStore {
@@ -80,6 +78,19 @@ export function createDailySessionStore(date: string): DailySessionStore {
     listeners.forEach((listener) => listener());
   }
 
+  function persist(nextSessions: Session[]) {
+    const serialized = JSON.stringify({
+      version: STORAGE_VERSION,
+      sessions: nextSessions,
+    } satisfies StoredDailySessions);
+
+    window.localStorage.setItem(key, serialized);
+    cachedRaw = serialized;
+    cachedSessions = nextSessions;
+    emitChange();
+    window.dispatchEvent(new Event(LOCAL_SESSIONS_CHANGED_EVENT));
+  }
+
   function handleStorage(event: StorageEvent) {
     if (event.key === key || event.key === null) {
       cachedRaw = undefined;
@@ -103,73 +114,15 @@ export function createDailySessionStore(date: string): DailySessionStore {
     },
     update(updater) {
       const nextSessions = updater(getSnapshot());
-      const serialized = JSON.stringify({
-        version: STORAGE_VERSION,
-        sessions: nextSessions,
-      } satisfies StoredDailySessions);
-
-      window.localStorage.setItem(key, serialized);
-      cachedRaw = serialized;
-      cachedSessions = nextSessions;
-      emitChange();
+      persist(nextSessions);
     },
-  };
-}
+    reconcileExpiredSessions(timestamp = new Date()) {
+      const currentSessions = getSnapshot();
+      const nextSessions = resolveExpiredSessions(currentSessions, timestamp);
+      if (nextSessions === currentSessions) return false;
 
-export function createDailyReportStore(date: string): DailyReportStore {
-  const key = `${REPORT_STORAGE_KEY_PREFIX}${date}`;
-  const listeners = new Set<() => void>();
-  let cachedRaw: string | null | undefined;
-  let cachedMinutes = 0;
-
-  function getSnapshot(): number {
-    const raw = window.localStorage.getItem(key);
-
-    if (raw === cachedRaw) return cachedMinutes;
-
-    cachedRaw = raw;
-    cachedMinutes = parseDeepWorkMinutes(raw);
-    return cachedMinutes;
-  }
-
-  function emitChange() {
-    listeners.forEach((listener) => listener());
-  }
-
-  function handleStorage(event: StorageEvent) {
-    if (event.key === key || event.key === null) {
-      cachedRaw = undefined;
-      emitChange();
-    }
-  }
-
-  return {
-    getSnapshot,
-    getServerSnapshot: () => 0,
-    subscribe(listener) {
-      listeners.add(listener);
-      window.addEventListener("storage", handleStorage);
-
-      return () => {
-        listeners.delete(listener);
-        if (listeners.size === 0) {
-          window.removeEventListener("storage", handleStorage);
-        }
-      };
-    },
-    setDeepWorkMinutes(minutes) {
-      const safeMinutes = Number.isFinite(minutes)
-        ? Math.min(24 * 60, Math.max(0, Math.round(minutes)))
-        : 0;
-      const serialized = JSON.stringify({
-        version: STORAGE_VERSION,
-        deepWorkMinutes: safeMinutes,
-      } satisfies StoredDailyReport);
-
-      window.localStorage.setItem(key, serialized);
-      cachedRaw = serialized;
-      cachedMinutes = safeMinutes;
-      emitChange();
+      persist(nextSessions);
+      return true;
     },
   };
 }
@@ -233,6 +186,31 @@ export function createHistoryStore(today: string): HistoryStore {
         }
       };
     },
+    reconcileExpiredSessions(timestamp = new Date()) {
+      let changed = false;
+
+      getHistoricalEntries(today).forEach(({ date, raw }) => {
+        const sessions = parseStoredSessions(raw, date, false);
+        const nextSessions = resolveExpiredSessions(sessions, timestamp);
+        if (nextSessions === sessions) return;
+
+        window.localStorage.setItem(
+          `${STORAGE_KEY_PREFIX}${date}`,
+          JSON.stringify({
+            version: STORAGE_VERSION,
+            sessions: nextSessions,
+          } satisfies StoredDailySessions)
+        );
+        changed = true;
+      });
+
+      if (changed) {
+        cachedSignature = undefined;
+        window.dispatchEvent(new Event(LOCAL_SESSIONS_CHANGED_EVENT));
+      }
+
+      return changed;
+    },
   };
 }
 
@@ -243,8 +221,9 @@ export function createDefaultDailySessions(date: string): Session[] {
     startedAt: null,
     finishedAt: null,
     finishTarget: null,
-    distracted: false,
-    status: "not_started",
+    distracted: null,
+    distractionReason: null,
+    status: "upcoming",
     tasks: [],
     date,
   }));
@@ -282,7 +261,8 @@ function parseStoredSessions(
     const parsed: unknown = JSON.parse(raw);
     if (
       !isRecord(parsed) ||
-      parsed.version !== STORAGE_VERSION ||
+      (parsed.version !== STORAGE_VERSION &&
+        parsed.version !== LEGACY_STORAGE_VERSION) ||
       !Array.isArray(parsed.sessions)
     ) {
       return includeMissing ? createDefaultDailySessions(date) : [];
@@ -306,15 +286,14 @@ function parseStoredSessions(
         startedAt: nullableString(candidate.startedAt),
         finishedAt: nullableString(candidate.finishedAt),
         finishTarget: nullableClockTime(candidate.finishTarget),
-        distracted:
-          typeof candidate.distracted === "boolean"
-            ? candidate.distracted
-            : fallback.distracted,
-        status: isSessionStatus(candidate.status)
-          ? candidate.status
-          : fallback.status,
+        distracted: normalizeDistraction(
+          candidate.distracted,
+          parsed.version
+        ),
+        distractionReason: nullableString(candidate.distractionReason),
+        status: normalizeSessionStatus(candidate.status, fallback.status),
         tasks: Array.isArray(candidate.tasks)
-          ? candidate.tasks.flatMap(normalizeTask)
+          ? candidate.tasks.flatMap((task) => normalizeTask(task))
           : [],
       }];
     });
@@ -361,8 +340,9 @@ function createDefaultSession(date: string, sessionType: SessionType): Session {
     startedAt: null,
     finishedAt: null,
     finishTarget: null,
-    distracted: false,
-    status: "not_started",
+    distracted: null,
+    distractionReason: null,
+    status: "upcoming",
     tasks: [],
     date,
   };
@@ -373,20 +353,53 @@ function normalizeTask(value: unknown): SessionTask[] {
     !isRecord(value) ||
     typeof value.id !== "string" ||
     typeof value.title !== "string" ||
-    typeof value.completed !== "boolean" ||
     typeof value.createdAt !== "string"
   ) {
     return [];
   }
 
+  const status = isTaskStatus(value.status)
+    ? value.status
+    : typeof value.completed === "boolean"
+      ? value.completed
+        ? "completed"
+        : "pending"
+      : null;
+  if (status === null) return [];
+
   return [
     {
       id: value.id,
       title: value.title,
-      completed: value.completed,
+      status,
+      startedAt: nullableString(value.startedAt),
+      finishedAt: nullableString(value.finishedAt),
       createdAt: value.createdAt,
+      updatedAt:
+        typeof value.updatedAt === "string"
+          ? value.updatedAt
+          : value.createdAt,
     },
   ];
+}
+
+function normalizeDistraction(
+  value: unknown,
+  storageVersion: unknown
+): boolean | null {
+  if (value === true) return true;
+  if (storageVersion === STORAGE_VERSION && value === false) return false;
+  return null;
+}
+
+function normalizeSessionStatus(
+  value: unknown,
+  fallback: SessionStatus
+): SessionStatus {
+  if (isSessionStatus(value)) return value;
+  if (value === "not_started") return "upcoming";
+  if (value === "in_progress") return "running";
+  return fallback;
 }
 
 function nullableString(value: unknown): string | null {
@@ -403,28 +416,12 @@ function nullableClockTime(value: unknown): string | null {
   return Number(hour) <= 23 && Number(minute) <= 59 ? value : null;
 }
 
-function parseDeepWorkMinutes(raw: string | null): number {
-  if (!raw) return 0;
-
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (
-      !isRecord(parsed) ||
-      parsed.version !== STORAGE_VERSION ||
-      typeof parsed.deepWorkMinutes !== "number" ||
-      !Number.isFinite(parsed.deepWorkMinutes)
-    ) {
-      return 0;
-    }
-
-    return Math.min(24 * 60, Math.max(0, Math.round(parsed.deepWorkMinutes)));
-  } catch {
-    return 0;
-  }
-}
-
 function isSessionStatus(value: unknown): value is SessionStatus {
   return typeof value === "string" && SESSION_STATUSES.has(value as SessionStatus);
+}
+
+function isTaskStatus(value: unknown): value is SessionTaskStatus {
+  return typeof value === "string" && TASK_STATUSES.has(value as SessionTaskStatus);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

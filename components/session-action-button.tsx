@@ -18,7 +18,7 @@ export function SessionActionButton({
   if (status === "completed") {
     return (
       <Button
-        className="h-9 w-full gap-2 rounded-md text-[14px] font-medium shadow-none"
+        className="h-12 w-full gap-2 rounded-[10px] text-[15px] font-semibold shadow-none"
         variant="secondary"
         disabled
       >
@@ -28,25 +28,25 @@ export function SessionActionButton({
     );
   }
 
-  if (status === "skipped") {
+  if (status === "skipped" || status === "missed") {
     return (
       <Button
-        className="h-9 w-full gap-2 rounded-md text-[14px] font-medium shadow-none"
+        className="h-12 w-full gap-2 rounded-[10px] text-[15px] font-semibold shadow-none"
         variant="outline"
         disabled
       >
         <CircleSlash2 className="size-4" />
-        Skipped
+        {status === "skipped" ? "Skipped" : "Missed"}
       </Button>
     );
   }
 
-  const isStarting = status === "not_started";
+  const isStarting = status === "upcoming";
 
   return (
     <Button
       type="button"
-      className="h-9 w-full gap-2 rounded-md text-[14px] font-medium shadow-none"
+      className="h-12 w-full gap-2 rounded-[10px] bg-brand-deep text-[15px] font-semibold shadow-none hover:bg-brand-dark"
       variant="default"
       onClick={isStarting ? onStart : onFinish}
     >

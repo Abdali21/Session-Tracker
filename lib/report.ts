@@ -1,50 +1,244 @@
-import { getSessionTimeline } from "@/lib/session";
-import type { Session } from "@/types/session";
+import {
+  calculateDeepWorkDuration,
+  calculateLateMinutes,
+  getTrackedTaskTime,
+} from "@/lib/session";
+import { SESSION_TYPES, type Session } from "@/types/session";
 
-const DEEP_WORK_TARGET_MINUTES = 6 * 60;
-const DAILY_SESSION_COUNT = 3;
-
-export interface DailyReportMetrics {
+export interface DailyExecutionMetrics {
   deepWorkMinutes: number;
-  completedTasks: number;
-  totalTasks: number;
   completedSessions: number;
-  respectedSessions: number;
-  normalized: {
-    deepWork: number;
-    tasks: number;
-    sessions: number;
-    timeDiscipline: number;
-  };
+  missedSessions: number;
+  lateSessions: number;
+  totalLateMinutes: number;
+  distractedSessions: number;
+  completedTasks: number;
+  trackedTaskTimeSeconds: number;
 }
 
-export function getDailyReportMetrics(
-  sessions: Session[],
-  deepWorkMinutes: number
-): DailyReportMetrics {
-  const safeDeepWorkMinutes = Math.max(0, deepWorkMinutes);
-  const tasks = sessions.flatMap((session) => session.tasks);
-  const completedTasks = tasks.filter((task) => task.completed).length;
-  const completedSessions = sessions.filter(
-    (session) => session.status === "completed"
-  ).length;
-  const respectedSessions = sessions.filter(
-    (session) => getSessionTimeline(session).result.tone === "success"
-  ).length;
+export type ExecutionVerdict =
+  | "better_than_yesterday"
+  | "worse_than_yesterday"
+  | "same_as_yesterday"
+  | "day_in_progress"
+  | "no_yesterday_data";
 
-  return {
-    deepWorkMinutes: safeDeepWorkMinutes,
-    completedTasks,
-    totalTasks: tasks.length,
-    completedSessions,
-    respectedSessions,
-    normalized: {
-      deepWork: normalize(safeDeepWorkMinutes, DEEP_WORK_TARGET_MINUTES),
-      tasks: tasks.length === 0 ? 0 : normalize(completedTasks, tasks.length),
-      sessions: normalize(completedSessions, DAILY_SESSION_COUNT),
-      timeDiscipline: normalize(respectedSessions, DAILY_SESSION_COUNT),
+export interface ExecutionComparison {
+  verdict: ExecutionVerdict;
+  todayViolations: number;
+  yesterdayViolations: number | null;
+}
+
+export interface ExecutionInsight {
+  area: "Attendance" | "Focus" | "Punctuality" | "Deep Work";
+  detail: string;
+}
+
+export function getDailyExecutionMetrics(
+  sessions: Session[],
+  timestamp = new Date()
+): DailyExecutionMetrics {
+  return sessions.reduce<DailyExecutionMetrics>(
+    (metrics, session) => {
+      const lateMinutes = calculateLateMinutes(session) ?? 0;
+
+      metrics.deepWorkMinutes +=
+        calculateDeepWorkDuration(session, timestamp) ?? 0;
+      metrics.completedSessions += session.status === "completed" ? 1 : 0;
+      metrics.missedSessions +=
+        session.status === "missed" || session.status === "skipped" ? 1 : 0;
+      metrics.lateSessions += lateMinutes > 0 ? 1 : 0;
+      metrics.totalLateMinutes += lateMinutes;
+      metrics.distractedSessions += session.distracted === true ? 1 : 0;
+      metrics.completedTasks += session.tasks.filter(
+        (task) => task.status === "completed"
+      ).length;
+      metrics.trackedTaskTimeSeconds += getTrackedTaskTime(
+        session,
+        timestamp
+      );
+
+      return metrics;
     },
-  };
+    {
+      deepWorkMinutes: 0,
+      completedSessions: 0,
+      missedSessions: 0,
+      lateSessions: 0,
+      totalLateMinutes: 0,
+      distractedSessions: 0,
+      completedTasks: 0,
+      trackedTaskTimeSeconds: 0,
+    }
+  );
+}
+
+export function getViolationCount(metrics: DailyExecutionMetrics): number {
+  return (
+    metrics.missedSessions +
+    metrics.lateSessions +
+    metrics.distractedSessions
+  );
+}
+
+export function isDailyExecutionFinal(sessions: Session[]): boolean {
+  return (
+    sessions.length === SESSION_TYPES.length &&
+    sessions.every((session) => {
+      if (session.status === "missed") return true;
+      if (session.status !== "completed") return false;
+
+      return session.startedAt !== null && session.distracted !== null;
+    })
+  );
+}
+
+export function compareExecutionDays(
+  todaySessions: Session[],
+  today: DailyExecutionMetrics,
+  yesterday: DailyExecutionMetrics | null
+): ExecutionComparison {
+  const todayViolations = getViolationCount(today);
+  const yesterdayViolations =
+    yesterday === null ? null : getViolationCount(yesterday);
+
+  if (!isDailyExecutionFinal(todaySessions)) {
+    return {
+      verdict: "day_in_progress",
+      todayViolations,
+      yesterdayViolations,
+    };
+  }
+
+  if (yesterday === null || yesterdayViolations === null) {
+    return {
+      verdict: "no_yesterday_data",
+      todayViolations,
+      yesterdayViolations: null,
+    };
+  }
+
+  if (todayViolations < yesterdayViolations) {
+    return {
+      verdict: "better_than_yesterday",
+      todayViolations,
+      yesterdayViolations,
+    };
+  }
+
+  if (todayViolations > yesterdayViolations) {
+    return {
+      verdict: "worse_than_yesterday",
+      todayViolations,
+      yesterdayViolations,
+    };
+  }
+
+  const verdict =
+    today.deepWorkMinutes > yesterday.deepWorkMinutes
+      ? "better_than_yesterday"
+      : today.deepWorkMinutes < yesterday.deepWorkMinutes
+        ? "worse_than_yesterday"
+        : "same_as_yesterday";
+
+  return { verdict, todayViolations, yesterdayViolations };
+}
+
+export function getImprovedAreas(
+  today: DailyExecutionMetrics,
+  yesterday: DailyExecutionMetrics | null
+): ExecutionInsight[] {
+  if (yesterday === null) return [];
+
+  const improved: ExecutionInsight[] = [];
+  if (today.missedSessions < yesterday.missedSessions) {
+    improved.push({
+      area: "Attendance",
+      detail:
+        today.missedSessions === 0
+          ? "No missed sessions today."
+          : `Missed sessions decreased from ${yesterday.missedSessions} to ${today.missedSessions}.`,
+    });
+  }
+
+  if (today.distractedSessions < yesterday.distractedSessions) {
+    improved.push({
+      area: "Focus",
+      detail:
+        today.distractedSessions === 0
+          ? "No distraction recorded today."
+          : `Distracted sessions decreased from ${yesterday.distractedSessions} to ${today.distractedSessions}.`,
+    });
+  }
+
+  if (today.lateSessions < yesterday.lateSessions) {
+    improved.push({
+      area: "Punctuality",
+      detail:
+        today.lateSessions === 0
+          ? "Every attended session started on time."
+          : `Late starts decreased from ${yesterday.lateSessions} to ${today.lateSessions}.`,
+    });
+  }
+
+  if (today.deepWorkMinutes > yesterday.deepWorkMinutes) {
+    improved.push({
+      area: "Deep Work",
+      detail: `Deep Work increased by ${formatDeepWork(
+        today.deepWorkMinutes - yesterday.deepWorkMinutes
+      )}.`,
+    });
+  }
+
+  return improved;
+}
+
+export function getNeedsFocusAreas(
+  today: DailyExecutionMetrics,
+  yesterday: DailyExecutionMetrics | null
+): ExecutionInsight[] {
+  const needsFocus: ExecutionInsight[] = [];
+
+  if (today.missedSessions > 0) {
+    needsFocus.push({
+      area: "Attendance",
+      detail: `${today.missedSessions} ${
+        today.missedSessions === 1 ? "session was" : "sessions were"
+      } missed.`,
+    });
+  }
+
+  if (today.distractedSessions > 0) {
+    needsFocus.push({
+      area: "Focus",
+      detail: `${today.distractedSessions} ${
+        today.distractedSessions === 1 ? "session had" : "sessions had"
+      } distraction today.`,
+    });
+  }
+
+  if (today.lateSessions > 0) {
+    needsFocus.push({
+      area: "Punctuality",
+      detail: `${today.lateSessions} of 3 ${
+        today.lateSessions === 1 ? "session started" : "sessions started"
+      } late.`,
+    });
+  }
+
+  if (
+    yesterday !== null &&
+    today.deepWorkMinutes < yesterday.deepWorkMinutes
+  ) {
+    needsFocus.push({
+      area: "Deep Work",
+      detail: `${formatDeepWork(
+        yesterday.deepWorkMinutes - today.deepWorkMinutes
+      )} lower than yesterday.`,
+    });
+  }
+
+  return needsFocus;
 }
 
 export function formatDeepWork(minutes: number): string {
@@ -56,65 +250,4 @@ export function formatDeepWork(minutes: number): string {
   if (remainingMinutes === 0) return `${hours}h`;
 
   return `${hours}h ${remainingMinutes}m`;
-}
-
-export function getDailyInterpretation(metrics: DailyReportMetrics): string {
-  const {
-    completedSessions,
-    respectedSessions,
-    completedTasks,
-    totalTasks,
-    deepWorkMinutes,
-  } = metrics;
-
-  if (
-    completedSessions === 0 &&
-    completedTasks === 0 &&
-    deepWorkMinutes === 0
-  ) {
-    return "No completed work is recorded yet. Add your Focus To-Do time as the day develops.";
-  }
-
-  let sessionSummary: string;
-  if (completedSessions === DAILY_SESSION_COUNT) {
-    sessionSummary =
-      respectedSessions === DAILY_SESSION_COUNT
-        ? "All three sessions were completed and respected their planned time."
-        : `All three sessions were completed, but ${formatCount(
-            respectedSessions
-          )} respected the planned time.`;
-  } else if (completedSessions === 0) {
-    sessionSummary = "No sessions have been completed yet.";
-  } else {
-    sessionSummary = `${formatCount(
-      completedSessions
-    )} completed; ${formatCount(
-      respectedSessions
-    )} respected the planned time.`;
-  }
-
-  let workSummary: string;
-  const taskRate = totalTasks === 0 ? 0 : completedTasks / totalTasks;
-  if (deepWorkMinutes >= DEEP_WORK_TARGET_MINUTES && taskRate >= 0.75) {
-    workSummary = "Deep work reached its target and task completion was strong.";
-  } else if (deepWorkMinutes >= DEEP_WORK_TARGET_MINUTES) {
-    workSummary = "Deep work reached its six-hour target.";
-  } else if (totalTasks === 0) {
-    workSummary = "No tasks were recorded today.";
-  } else if (taskRate >= 0.75) {
-    workSummary = "Task completion was strong, while deep work remained below target.";
-  } else {
-    workSummary = "Deep work and task completion both remained below target.";
-  }
-
-  return `${sessionSummary} ${workSummary}`;
-}
-
-function normalize(value: number, target: number): number {
-  return Math.min(100, Math.max(0, Math.round((value / target) * 100)));
-}
-
-function formatCount(value: number): string {
-  const words = ["none", "one", "two", "three"];
-  return words[value] ?? String(value);
 }

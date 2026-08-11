@@ -1,160 +1,244 @@
-import { CircleAlert, Clock3 } from "lucide-react";
-import {
-  Card,
-  CardContent,
-  CardFooter,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { CircleAlert, CircleCheck, CircleX, Clock3 } from "lucide-react";
 import { SessionActionButton } from "@/components/session-action-button";
+import { EditableSessionTime } from "@/components/editable-session-time";
 import { SessionDurationCircle } from "@/components/session-duration-circle";
 import { SessionStatusBadge } from "@/components/session-status-badge";
-import { SessionTimeline } from "@/components/session-timeline";
 import { TaskForm } from "@/components/task-form";
 import { TaskItem } from "@/components/task-item";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { cn } from "@/lib/utils";
 import {
-  formatTime,
+  calculateLateMinutes,
+  evaluateStartTimeRule,
+  formatTaskDuration,
   getSessionLabel,
   getSessionScheduleLabel,
+  getTrackedTaskTime,
 } from "@/lib/session";
-import { type Session } from "@/types/session";
-import { SESSION_SCHEDULE } from "@/types/session";
+import type { Session } from "@/types/session";
 
 interface SessionCardProps {
   session: Session;
+  timestamp?: Date;
   onStart: () => void;
   onFinish: () => void;
   onAddTask: (title: string) => void;
-  onTaskCompletedChange: (taskId: string, completed: boolean) => void;
+  onStartTask: (taskId: string) => void;
+  onCompleteTask: (taskId: string) => void;
   onDeleteTask: (taskId: string) => void;
-  onFinishTargetChange: (finishTarget: string) => void;
+  onActualStartChange: (clockTime: string) => string | null;
+  onActualFinishChange: (clockTime: string) => string | null;
+  onUndoStart: () => void;
   onDistractedChange: (distracted: boolean) => void;
+  onDistractionReasonChange: (reason: string) => void;
   actionError?: string;
+  taskError?: string;
 }
 
 export function SessionCard({
   session,
+  timestamp,
   onStart,
   onFinish,
   onAddTask,
-  onTaskCompletedChange,
+  onStartTask,
+  onCompleteTask,
   onDeleteTask,
-  onFinishTargetChange,
+  onActualStartChange,
+  onActualFinishChange,
+  onUndoStart,
   onDistractedChange,
+  onDistractionReasonChange,
   actionError,
+  taskError,
 }: SessionCardProps) {
   const title = getSessionLabel(session.sessionType);
   const plannedTime = getSessionScheduleLabel(session.sessionType);
-  const schedule = SESSION_SCHEDULE[session.sessionType];
+  const startTimeRule = evaluateStartTimeRule(session);
+  const lateByMinutes = calculateLateMinutes(session);
+  const distractionDisabled =
+    session.status === "upcoming" ||
+    session.status === "missed" ||
+    session.status === "skipped";
+  const trackedTaskTime = getTrackedTaskTime(session, timestamp);
+
   return (
-    <Card className="min-w-0 gap-0 py-0">
-      <CardHeader className="border-b border-border/80 bg-muted/15 px-5 py-4">
-        <div className="flex items-start justify-between gap-3">
-          <CardTitle className="min-w-0 text-[17px] font-semibold leading-5">
+    <section className="overflow-hidden rounded-2xl border border-[#DEE2EA] bg-white shadow-[0_12px_32px_rgba(23,27,44,0.055)]">
+      <div className="flex items-start justify-between gap-6 px-8 py-7">
+        <div>
+          <h2 className="text-[23px] font-bold leading-7 text-[#161A2B]">
             {title}
-          </CardTitle>
-          <SessionStatusBadge status={session.status} />
-        </div>
-        <p className="mt-2 flex items-center gap-1.5 text-[12px] font-medium tabular-nums text-text-secondary">
-          <Clock3 className="size-3.5" />
-          {plannedTime}
-        </p>
-      </CardHeader>
-
-      <CardContent className="px-5 py-0">
-        <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_102px] items-center divide-x divide-border/80 py-4">
-          <div className="pr-4">
-            <span className="mb-1 block text-[12px] font-medium text-text-muted">
-              Start
+          </h2>
+          <div className="mt-3">
+            <span className="text-[13px] font-semibold text-[#8A92A3]">
+              Official Time
             </span>
-            <span className="text-[15px] font-medium tabular-nums">
-              {formatTime(session.startedAt)}
-            </span>
-          </div>
-          <div className="pl-4">
-            <span className="mb-1 block text-[12px] font-medium text-text-muted">
-              {session.status === "in_progress" ? "Finish target" : "Finish"}
-            </span>
-            {session.status === "in_progress" ? (
-              <Input
-                type="time"
-                min={schedule.plannedStart}
-                max={schedule.plannedFinish}
-                step="60"
-                value={session.finishTarget ?? schedule.plannedFinish}
-                onChange={(event) => onFinishTargetChange(event.target.value)}
-                aria-label={`${title} finish target`}
-                className="h-7 w-[116px] tabular-nums"
-              />
-            ) : (
-              <span className="text-[15px] font-medium tabular-nums">
-                {formatTime(session.finishedAt)}
-              </span>
-            )}
-          </div>
-          <div className="flex justify-end pl-4">
-            <SessionDurationCircle session={session} />
+            <p className="mt-1 flex items-center gap-2 text-[15px] font-semibold tabular-nums text-[#4B5366]">
+              <Clock3 className="size-4 text-brand" strokeWidth={1.9} />
+              {plannedTime}
+            </p>
           </div>
         </div>
+        <SessionStatusBadge status={session.status} />
+      </div>
 
-        <SessionTimeline session={session} />
-
-        <label className="-mx-5 flex items-center gap-2.5 border-b border-border/80 px-5 py-3 text-[13px] font-medium text-text-secondary">
-          <input
-            type="checkbox"
-            checked={session.distracted}
-            disabled={
-              session.status === "not_started" || session.status === "skipped"
-            }
-            onChange={(event) => onDistractedChange(event.target.checked)}
-            className="size-3.5 shrink-0 accent-[#513FB0] disabled:cursor-not-allowed disabled:opacity-45"
+      <div className="grid grid-cols-[1fr_1fr_152px] items-center border-y border-[#E5E8EE] bg-[#FCFCFD] px-8 py-6">
+        <div className="min-w-0 pr-7">
+          <EditableSessionTime
+            label="Actual Start"
+            value={session.startedAt}
+            editable={session.status === "running" || session.status === "completed"}
+            onSave={onActualStartChange}
+            onUndo={session.status === "running" ? onUndoStart : undefined}
           />
-          <span>I got distracted during this session</span>
-        </label>
+        </div>
+        <div className="min-w-0 border-l border-[#E0E4EB] px-7">
+          <EditableSessionTime
+            label="Actual Finish"
+            value={session.finishedAt}
+            editable={session.status === "completed"}
+            onSave={onActualFinishChange}
+          />
+        </div>
+        <div className="flex justify-end border-l border-[#E0E4EB] pl-7">
+          <SessionDurationCircle session={session} timestamp={timestamp} />
+        </div>
+      </div>
 
-        <div className="py-4">
-          <span className="mb-2 block text-[12px] font-medium text-text-secondary">
-            Tasks
+      <div className="px-8">
+        <div
+          className={cn(
+            "my-6 flex min-h-12 items-center justify-between rounded-xl border px-4",
+            startTimeRule === "respected"
+              ? "border-[#C8E9D7] bg-[#F2FBF6]"
+              : startTimeRule === "broken"
+                ? "border-[#F3D1CD] bg-[#FFF6F5]"
+                : "border-[#E1DFF1] bg-[#F7F6FC]"
+          )}
+        >
+          <span className="text-[14px] font-semibold text-[#4D5568]">
+            Start Time
           </span>
+          {startTimeRule === "respected" ? (
+            <span className="flex items-center gap-2 text-[14px] font-semibold text-[#16815A]">
+              <CircleCheck className="size-4" />
+              Respected
+            </span>
+          ) : startTimeRule === "broken" && lateByMinutes !== null ? (
+            <span className="flex items-center gap-2 text-[14px] font-semibold text-[#C33A30]">
+              <CircleX className="size-4" />
+              {lateByMinutes}m late
+            </span>
+          ) : (
+            <span className="text-[14px] font-semibold text-[#817CA7]">
+              Not started
+            </span>
+          )}
+        </div>
+
+        <div className="border-t border-[#E7E9EF] py-6">
+          <div className="flex items-center justify-between gap-6">
+            <div>
+              <h3 className="text-[14px] font-semibold text-[#343A4C]">
+                Did you get distracted during this session?
+              </h3>
+            </div>
+            <div
+              className="flex rounded-[10px] border border-[#DCE0E8] bg-[#F8F9FB] p-1"
+              role="group"
+              aria-label="Distraction"
+            >
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                disabled={distractionDisabled}
+                aria-pressed={session.distracted === true}
+                onClick={() => onDistractedChange(true)}
+                className={cn(
+                  "h-8 rounded-lg px-4 text-[13px] font-semibold shadow-none",
+                  session.distracted === true
+                    ? "bg-[#FFF0EE] text-[#B42318] hover:bg-[#FFE8E5] hover:text-[#B42318]"
+                    : "text-[#737B8D]"
+                )}
+              >
+                Yes
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                disabled={distractionDisabled}
+                aria-pressed={session.distracted === false}
+                onClick={() => onDistractedChange(false)}
+                className={cn(
+                  "h-8 rounded-lg px-4 text-[13px] font-semibold shadow-none",
+                  session.distracted === false
+                    ? "bg-[#EAF8F0] text-[#087A4C] hover:bg-[#DFF4E8] hover:text-[#087A4C]"
+                    : "text-[#737B8D]"
+                )}
+              >
+                No
+              </Button>
+            </div>
+          </div>
+          {session.distracted === true ? (
+            <Input
+              type="text"
+              value={session.distractionReason ?? ""}
+              onChange={(event) => onDistractionReasonChange(event.target.value)}
+              placeholder="Optional reason..."
+              aria-label="Distraction reason"
+              className="mt-4 h-10 rounded-[10px] text-[14px]"
+            />
+          ) : null}
+        </div>
+
+        <div className="border-t border-[#E7E9EF] py-6">
+          <div className="mb-3 flex items-center justify-between gap-4">
+            <h3 className="text-[15px] font-bold text-[#262B3B]">Tasks</h3>
+            <span className="text-[13px] font-semibold tabular-nums text-[#7E8799]">
+              Tracked: {formatTaskDuration(trackedTaskTime)}
+            </span>
+          </div>
           {session.tasks.length > 0 ? (
-            <ul className="divide-y divide-border/60">
+            <ul className="divide-y divide-[#E8EAF0] border-y border-[#E8EAF0]">
               {session.tasks.map((task) => (
                 <TaskItem
                   key={task.id}
                   task={task}
-                  onCompletedChange={(completed) =>
-                    onTaskCompletedChange(task.id, completed)
-                  }
+                  session={session}
+                  timestamp={timestamp}
+                  onStart={() => onStartTask(task.id)}
+                  onComplete={() => onCompleteTask(task.id)}
                   onDelete={() => onDeleteTask(task.id)}
                 />
               ))}
             </ul>
           ) : (
-            <p className="py-2 text-[14px] font-normal text-text-muted">
+            <p className="border-y border-[#E8EAF0] py-5 text-[14px] text-[#9199A8]">
               No tasks yet
             </p>
           )}
+          {taskError ? (
+            <p role="alert" className="mt-3 text-[13px] font-semibold text-[#C33A30]">
+              {taskError}
+            </p>
+          ) : null}
           <TaskForm onAddTask={onAddTask} />
         </div>
-      </CardContent>
+      </div>
 
-      <CardFooter className="flex-col items-stretch gap-3 rounded-none border-t border-border/80 bg-muted/15 px-5 py-4">
-        {actionError && (
-          <p
-            role="alert"
-            className="flex items-start gap-2 text-[12px] font-medium leading-4 text-[#D92D20]"
-          >
-            <CircleAlert className="mt-px size-3.5 shrink-0" aria-hidden="true" />
+      <div className="border-t border-[#E3E6ED] bg-[#FAFBFC] px-8 py-5">
+        {actionError ? (
+          <p role="alert" className="mb-3 flex items-start gap-2 text-[13px] font-semibold leading-5 text-[#C33A30]">
+            <CircleAlert className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
             {actionError}
           </p>
-        )}
-        <SessionActionButton
-          status={session.status}
-          onStart={onStart}
-          onFinish={onFinish}
-        />
-      </CardFooter>
-    </Card>
+        ) : null}
+        <SessionActionButton status={session.status} onStart={onStart} onFinish={onFinish} />
+      </div>
+    </section>
   );
 }

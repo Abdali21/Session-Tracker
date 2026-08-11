@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Geist } from "next/font/google";
+import { SessionTimingCoordinator } from "@/components/session-timing-coordinator";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -23,7 +24,8 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} h-full antialiased`}
     >
-      <body className="flex min-h-full min-w-[1180px] flex-col bg-background text-foreground">
+      <body className="min-h-full min-w-[1024px] bg-background text-foreground">
+        <SessionTimingCoordinator />
         {children}
       </body>
     </html>

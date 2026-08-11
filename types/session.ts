@@ -11,23 +11,36 @@ export const SESSION_TYPES = [
 export type SessionType = (typeof SESSION_TYPES)[number];
 
 export type SessionStatus =
-  | "not_started"
-  | "in_progress"
+  | "upcoming"
+  | "running"
   | "completed"
+  | "missed"
   | "skipped";
 
 export const SESSION_STATUS_LABELS = {
-  not_started: "Not Started",
-  in_progress: "In Progress",
+  upcoming: "Upcoming",
+  running: "Running",
   completed: "Completed",
+  missed: "Missed",
   skipped: "Skipped",
 } satisfies Record<SessionStatus, string>;
+
+export type SessionTaskStatus = "pending" | "running" | "completed";
+
+export type StartTimeRule = "respected" | "broken" | "pending";
+
+export type DistractionRule = "respected" | "broken" | "pending";
 
 export interface SessionTask {
   id: string;
   title: string;
-  completed: boolean;
+  status: SessionTaskStatus;
+  /** ISO 8601 string of actual task start time */
+  startedAt: string | null;
+  /** ISO 8601 string of actual task finish time */
+  finishedAt: string | null;
   createdAt: string;
+  updatedAt: string;
 }
 
 export interface Session {
@@ -37,9 +50,11 @@ export interface Session {
   startedAt: string | null;
   /** ISO 8601 string of actual finish time */
   finishedAt: string | null;
-  /** Projected finish clock time in HH:mm format while in progress */
+  /** Legacy projected finish value retained for stored-record compatibility. */
   finishTarget: string | null;
-  distracted: boolean;
+  /** Null until the user explicitly answers the distraction question. */
+  distracted: boolean | null;
+  distractionReason: string | null;
   status: SessionStatus;
   tasks: SessionTask[];
   /** Calendar date this session belongs to, e.g. "2026-08-09" */

@@ -2,7 +2,7 @@ import {
   createDefaultDailySessions,
   importDailySessionsIfMissing,
 } from "@/lib/local-sessions";
-import { WORK_SESSION_TIME_ZONE } from "@/lib/session";
+import { casablancaWallTimeToDate } from "@/lib/session";
 import type { SessionType } from "@/types/session";
 
 interface SeedSession {
@@ -108,8 +108,10 @@ export function seedPreviousHistory(today: string): number {
       if (seed?.startTime) {
         return {
           ...session,
-          startedAt: casablancaWallTimeToIso(day.date, seed.startTime),
-          status: "in_progress" as const,
+          startedAt:
+            casablancaWallTimeToDate(day.date, seed.startTime)?.toISOString() ??
+            null,
+          status: "running" as const,
         };
       }
 
@@ -120,37 +122,4 @@ export function seedPreviousHistory(today: string): number {
       ? importedDays + 1
       : importedDays;
   }, 0);
-}
-
-function casablancaWallTimeToIso(date: string, time: string): string {
-  const [year, month, day] = date.split("-").map(Number);
-  const [hour, minute] = time.split(":").map(Number);
-  const targetWallTime = Date.UTC(year, month - 1, day, hour, minute);
-  let instant = targetWallTime;
-
-  for (let pass = 0; pass < 2; pass += 1) {
-    const parts = new Intl.DateTimeFormat("en-US", {
-      timeZone: WORK_SESSION_TIME_ZONE,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      hourCycle: "h23",
-    }).formatToParts(new Date(instant));
-    const values = Object.fromEntries(
-      parts.map(({ type, value }) => [type, Number(value)])
-    );
-    const representedWallTime = Date.UTC(
-      values.year,
-      values.month - 1,
-      values.day,
-      values.hour,
-      values.minute
-    );
-
-    instant += targetWallTime - representedWallTime;
-  }
-
-  return new Date(instant).toISOString();
 }

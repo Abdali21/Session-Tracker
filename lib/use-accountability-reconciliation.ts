@@ -2,6 +2,7 @@
 
 import { useEffect } from "react";
 import type { AccountabilityStore } from "@/lib/local-accountability";
+import { resolveExpiredSessions } from "@/lib/session";
 import type { Session } from "@/types/session";
 
 export function useAccountabilityReconciliation(
@@ -12,7 +13,7 @@ export function useAccountabilityReconciliation(
     function reconcile() {
       const now = new Date();
       store.activate(now);
-      store.reconcile(sessions, now);
+      store.reconcile(resolveExpiredSessions(sessions, now), now);
     }
 
     function handleVisibilityChange() {

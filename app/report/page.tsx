@@ -1,26 +1,44 @@
 "use client";
 
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import {
-  type FormEvent,
-  useMemo,
-  useState,
-  useSyncExternalStore,
-} from "react";
-import { Calendar, Check, Clock3 } from "lucide-react";
-import { AppHeader } from "@/components/app-header";
-import { DailyShapeChart } from "@/components/daily-shape-chart";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+  ArrowDownRight,
+  ArrowUpRight,
+  CalendarDays,
+  CheckCircle2,
+  CircleAlert,
+  Equal,
+  LoaderCircle,
+  Minus,
+  TrendingDown,
+  TrendingUp,
+} from "lucide-react";
+import { AppShell } from "@/components/app-shell";
+import { PageHeader } from "@/components/page-header";
+import { seedPreviousHistory } from "@/lib/history-seed";
 import {
-  createDailyReportStore,
   createDailySessionStore,
+  createHistoryStore,
 } from "@/lib/local-sessions";
 import {
   formatDeepWork,
-  getDailyInterpretation,
-  getDailyReportMetrics,
+  compareExecutionDays,
+  getDailyExecutionMetrics,
+  getImprovedAreas,
+  getNeedsFocusAreas,
+  getViolationCount,
+  type DailyExecutionMetrics,
+  type ExecutionInsight,
+  type ExecutionVerdict,
 } from "@/lib/report";
-import { formatTodayDate, todayDateString } from "@/lib/session";
+import {
+  formatHistoryDate,
+  formatTaskDuration,
+  getPreviousCalendarDate,
+  todayDateString,
+} from "@/lib/session";
+import { useSessionTiming } from "@/lib/use-session-timing";
+import { cn } from "@/lib/utils";
 
 const subscribeToNothing = () => () => {};
 
@@ -30,200 +48,404 @@ export default function ReportPage() {
     () => true,
     () => false
   );
-  const date = todayDateString();
-  const sessionStore = useMemo(() => createDailySessionStore(date), [date]);
-  const reportStore = useMemo(() => createDailyReportStore(date), [date]);
-  const sessions = useSyncExternalStore(
-    sessionStore.subscribe,
-    sessionStore.getSnapshot,
-    sessionStore.getServerSnapshot
+  const [date] = useState(todayDateString);
+  const yesterday = getPreviousCalendarDate(date);
+  const todayStore = useMemo(() => createDailySessionStore(date), [date]);
+  const historyStore = useMemo(() => createHistoryStore(date), [date]);
+  const todaySessions = useSyncExternalStore(
+    todayStore.subscribe,
+    todayStore.getSnapshot,
+    todayStore.getServerSnapshot
   );
-  const deepWorkMinutes = useSyncExternalStore(
-    reportStore.subscribe,
-    reportStore.getSnapshot,
-    reportStore.getServerSnapshot
+  const historyDays = useSyncExternalStore(
+    historyStore.subscribe,
+    historyStore.getSnapshot,
+    historyStore.getServerSnapshot
   );
-  const metrics = useMemo(
-    () => getDailyReportMetrics(sessions, deepWorkMinutes),
-    [deepWorkMinutes, sessions]
+  const historicalSessions = useMemo(
+    () => historyDays.flatMap((day) => day.sessions),
+    [historyDays]
   );
+  const timingNow = useSessionTiming(todayStore, todaySessions);
+  useSessionTiming(historyStore, historicalSessions);
 
-  const summaryMetrics = [
-    {
-      label: "Deep Work",
-      value: formatDeepWork(metrics.deepWorkMinutes),
-      detail: "6h target",
-    },
-    {
-      label: "Tasks Completed",
-      value: `${metrics.completedTasks} / ${metrics.totalTasks}`,
-      detail: `${metrics.normalized.tasks}% complete`,
-    },
-    {
-      label: "Sessions Completed",
-      value: `${metrics.completedSessions} / 3`,
-      detail: `${metrics.normalized.sessions}% complete`,
-    },
-    {
-      label: "Time Discipline",
-      value: `${metrics.respectedSessions} / 3`,
-      detail: `${metrics.normalized.timeDiscipline}% respected`,
-    },
-  ];
+  useEffect(() => {
+    seedPreviousHistory(date);
+  }, [date]);
+
+  const todayMetrics = useMemo(
+    () => getDailyExecutionMetrics(todaySessions, timingNow ?? new Date()),
+    [todaySessions, timingNow]
+  );
+  const yesterdaySessions = historyDays.find(
+    (day) => day.date === yesterday
+  )?.sessions;
+  const yesterdayMetrics = useMemo(
+    () =>
+      yesterdaySessions
+        ? getDailyExecutionMetrics(yesterdaySessions, timingNow ?? new Date())
+        : null,
+    [timingNow, yesterdaySessions]
+  );
+  const comparison = compareExecutionDays(
+    todaySessions,
+    todayMetrics,
+    yesterdayMetrics
+  );
+  const improvedAreas =
+    comparison.verdict === "day_in_progress" ||
+    comparison.verdict === "no_yesterday_data"
+      ? []
+      : getImprovedAreas(todayMetrics, yesterdayMetrics);
+  const needsFocusAreas = getNeedsFocusAreas(
+    todayMetrics,
+    comparison.verdict === "day_in_progress" ? null : yesterdayMetrics
+  );
+  const rows = createComparisonRows(yesterdayMetrics, todayMetrics);
 
   return (
-    <div className="flex min-h-screen flex-1 flex-col bg-background">
-      <AppHeader activePage="report" />
+    <AppShell activePage="report">
+      <div className="space-y-8">
+        <PageHeader
+          title="Report"
+          eyebrow={
+            isClient
+              ? `${formatHistoryDate(yesterday)} compared with today`
+              : "Today compared with yesterday"
+          }
+          description="Am I executing better today than yesterday?"
+          icon={CalendarDays}
+        />
 
-      <main className="mx-auto w-full max-w-[1440px] flex-1 px-8 py-7">
-        <div className="flex flex-col gap-6">
-          <div className="flex items-end justify-between gap-8 border-b border-border pb-5">
-            <div>
-              <div className="mb-1.5 flex items-center gap-1.5 text-text-muted">
-                <Calendar className="size-3.5" />
-                <span className="text-[12px] font-medium">
-                  {isClient ? formatTodayDate() : ""}
-                </span>
-              </div>
-              <h1 className="text-[28px] font-semibold leading-8">
-                Daily Report
-              </h1>
+        <VerdictPanel
+          verdict={comparison.verdict}
+          todayViolations={comparison.todayViolations}
+          yesterdayViolations={comparison.yesterdayViolations}
+          todayDeepWork={todayMetrics.deepWorkMinutes}
+          yesterdayDeepWork={yesterdayMetrics?.deepWorkMinutes ?? null}
+        />
+
+        <section
+          className="overflow-hidden rounded-2xl border border-[#DEE2EA] bg-white shadow-[0_12px_32px_rgba(23,27,44,0.05)]"
+          aria-labelledby="daily-comparison-heading"
+        >
+            <div className="flex items-center justify-between border-b border-[#E3E6ED] px-7 py-5">
+              <h2
+                id="daily-comparison-heading"
+                className="text-[20px] font-bold leading-6 text-[#202536]"
+              >
+                Today vs Yesterday
+              </h2>
+              <span className="text-[13px] font-semibold text-[#8992A4]">
+                Daily execution comparison
+              </span>
             </div>
 
-            <DeepWorkForm
-              key={deepWorkMinutes}
-              initialMinutes={deepWorkMinutes}
-              onSave={reportStore.setDeepWorkMinutes}
-            />
+            <table className="w-full border-collapse text-left">
+              <thead>
+                <tr className="border-b border-[#E3E6ED] bg-[#FAFBFC]">
+                  <th className="px-7 py-4 text-[13px] font-semibold text-[#7C8597]">
+                    Metric
+                  </th>
+                  <th className="w-[190px] px-6 py-4 text-[13px] font-semibold text-[#7C8597]">
+                    Yesterday
+                  </th>
+                  <th className="w-[190px] px-6 py-4 text-[13px] font-semibold text-[#7C8597]">
+                    Today
+                  </th>
+                  <th className="w-[170px] px-6 py-4 text-[13px] font-semibold text-[#7C8597]">
+                    Change
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row) => (
+                  <tr key={row.label} className="border-b border-[#E8EAF0] last:border-0">
+                    <th className="px-7 py-[18px] text-[15px] font-semibold text-[#343A4C]">
+                      {row.label}
+                    </th>
+                    <td className="px-6 py-[18px] text-[15px] font-semibold tabular-nums text-[#737C8E]">
+                      {row.yesterday}
+                    </td>
+                    <td className="px-6 py-[18px] text-[16px] font-bold tabular-nums text-brand-deep">
+                      {row.today}
+                    </td>
+                    <td className="px-6 py-[18px]">
+                      <span
+                        className={cn(
+                          "inline-flex items-center gap-1.5 text-[14px] font-bold tabular-nums",
+                          row.changeTone === "improvement"
+                            ? "text-[#16815A]"
+                            : row.changeTone === "decline"
+                              ? "text-[#C33A30]"
+                              : "text-[#8A92A3]"
+                        )}
+                      >
+                        {row.changeTone === "improvement" ? (
+                          <ArrowUpRight className="size-4" />
+                        ) : row.changeTone === "decline" ? (
+                          <ArrowDownRight className="size-4" />
+                        ) : (
+                          <Minus className="size-4" />
+                        )}
+                        {row.change}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+        </section>
+
+        {improvedAreas.length > 0 || needsFocusAreas.length > 0 ? (
+          <div className="grid grid-cols-1 gap-6 min-[1180px]:grid-cols-2">
+            {improvedAreas.length > 0 ? (
+              <InsightSection
+                title="What Improved"
+                items={improvedAreas}
+                tone="positive"
+              />
+            ) : null}
+            {needsFocusAreas.length > 0 ? (
+              <InsightSection
+                title="Needs Focus"
+                items={needsFocusAreas}
+                tone="negative"
+              />
+            ) : null}
           </div>
-
-          <div className="mx-auto w-full max-w-[1040px] space-y-5">
-            <dl className="grid grid-cols-4 divide-x divide-border overflow-hidden rounded-lg border border-border bg-card">
-              {summaryMetrics.map((metric) => (
-                <div key={metric.label} className="px-5 py-4">
-                  <dt className="text-[12px] font-medium text-text-secondary">
-                    {metric.label}
-                  </dt>
-                  <dd className="mt-1.5 text-[20px] font-semibold leading-6 tabular-nums text-foreground">
-                    {metric.value}
-                  </dd>
-                  <p className="mt-1 text-[12px] font-medium tabular-nums text-text-muted">
-                    {metric.detail}
-                  </p>
-                </div>
-              ))}
-            </dl>
-
-            <section
-              className="overflow-hidden rounded-lg border border-border bg-card"
-              aria-labelledby="today-shape-heading"
-            >
-              <div className="flex items-center justify-between border-b border-border px-6 py-4">
-                <div>
-                  <h2
-                    id="today-shape-heading"
-                    className="text-[17px] font-semibold leading-5"
-                  >
-                    Today&apos;s Shape
-                  </h2>
-                  <p className="mt-1 text-[12px] font-medium text-text-muted">
-                    Daily work signals
-                  </p>
-                </div>
-                <span className="flex items-center gap-1.5 text-[12px] font-medium text-text-muted">
-                  <Clock3 className="size-3.5" />
-                  6h deep-work target
-                </span>
-              </div>
-
-              <div className="px-8 py-5">
-                <DailyShapeChart values={metrics.normalized} />
-              </div>
-
-              <div className="border-t border-border bg-[#F4F2FB] px-6 py-4">
-                <p className="text-[12px] font-semibold text-[#413890]">
-                  Daily readout
-                </p>
-                <p className="mt-1 max-w-[760px] text-[14px] leading-5 text-foreground">
-                  {getDailyInterpretation(metrics)}
-                </p>
-              </div>
-            </section>
-          </div>
-        </div>
-      </main>
-    </div>
+        ) : null}
+      </div>
+    </AppShell>
   );
 }
 
-interface DeepWorkFormProps {
-  initialMinutes: number;
-  onSave: (minutes: number) => void;
+interface VerdictPanelProps {
+  verdict: ExecutionVerdict;
+  todayViolations: number;
+  yesterdayViolations: number | null;
+  todayDeepWork: number;
+  yesterdayDeepWork: number | null;
 }
 
-function DeepWorkForm({ initialMinutes, onSave }: DeepWorkFormProps) {
-  const [hours, setHours] = useState(
-    String(Math.floor(initialMinutes / 60))
-  );
-  const [minutes, setMinutes] = useState(String(initialMinutes % 60));
+const VERDICT_CONTENT: Record<
+  ExecutionVerdict,
+  { title: string; description: string; icon: typeof TrendingUp; className: string }
+> = {
+  better_than_yesterday: {
+    title: "Better than yesterday",
+    description: "Fewer execution failures, or stronger Deep Work with equal violations.",
+    icon: TrendingUp,
+    className: "border-[#BFE4D0] bg-[#F2FBF6] text-[#147A55]",
+  },
+  worse_than_yesterday: {
+    title: "Worse than yesterday",
+    description: "Execution violations increased, or Deep Work fell with equal violations.",
+    icon: TrendingDown,
+    className: "border-[#F1C9C4] bg-[#FFF5F3] text-[#B9382E]",
+  },
+  same_as_yesterday: {
+    title: "Same as yesterday",
+    description: "Execution violations and Deep Work are unchanged.",
+    icon: Equal,
+    className: "border-[#DDE1E9] bg-[#F8F9FB] text-[#5F687B]",
+  },
+  day_in_progress: {
+    title: "Day in progress",
+    description: "Complete today's sessions to see your final comparison.",
+    icon: LoaderCircle,
+    className: "border-[#D8D8EE] bg-[#F5F5FC] text-brand-deep",
+  },
+  no_yesterday_data: {
+    title: "No yesterday data",
+    description: "No session data recorded yesterday.",
+    icon: Minus,
+    className: "border-[#DDE1E9] bg-[#F8F9FB] text-[#5F687B]",
+  },
+};
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const parsedHours = Number.parseInt(hours, 10);
-    const parsedMinutes = Number.parseInt(minutes, 10);
-    const totalMinutes =
-      (Number.isFinite(parsedHours) ? Math.max(0, parsedHours) : 0) * 60 +
-      (Number.isFinite(parsedMinutes) ? Math.max(0, parsedMinutes) : 0);
-
-    onSave(totalMinutes);
-  }
+function VerdictPanel({
+  verdict,
+  todayViolations,
+  yesterdayViolations,
+  todayDeepWork,
+  yesterdayDeepWork,
+}: VerdictPanelProps) {
+  const content = VERDICT_CONTENT[verdict];
+  const Icon = content.icon;
 
   return (
-    <form
-      className="flex items-end gap-2"
-      onSubmit={handleSubmit}
-      aria-label="Record Focus To-Do deep work"
+    <section
+      className={cn(
+        "flex items-center justify-between gap-8 rounded-2xl border px-7 py-6",
+        content.className
+      )}
+      aria-labelledby="report-verdict-heading"
     >
-      <div className="mr-1">
-        <span className="block text-[12px] font-medium text-text-secondary">
-          Focus To-Do
+      <div className="flex items-start gap-4">
+        <span className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-white/70">
+          <Icon className="size-5" strokeWidth={2} />
         </span>
-        <span className="block text-[12px] text-text-muted">Deep work</span>
+        <div>
+          <h2 id="report-verdict-heading" className="text-[21px] font-bold leading-7">
+            {content.title}
+          </h2>
+          <p className="mt-1 text-[14px] font-medium leading-5 opacity-80">
+            {content.description}
+          </p>
+        </div>
       </div>
-      <label className="block">
-        <span className="mb-1 block text-[12px] font-medium text-text-muted">
-          Hours
-        </span>
-        <Input
-          type="number"
-          min="0"
-          max="24"
-          step="1"
-          inputMode="numeric"
-          value={hours}
-          onChange={(event) => setHours(event.target.value)}
-          className="w-16 tabular-nums"
-        />
-      </label>
-      <label className="block">
-        <span className="mb-1 block text-[12px] font-medium text-text-muted">
-          Minutes
-        </span>
-        <Input
-          type="number"
-          min="0"
-          max="59"
-          step="1"
-          inputMode="numeric"
-          value={minutes}
-          onChange={(event) => setMinutes(event.target.value)}
-          className="w-16 tabular-nums"
-        />
-      </label>
-      <Button type="submit" size="sm" className="h-8 px-3">
-        <Check className="size-3.5" />
-        Save
-      </Button>
-    </form>
+      <dl className="grid shrink-0 grid-cols-2 gap-x-9 gap-y-2 text-right">
+        <div>
+          <dt className="text-[12px] font-semibold opacity-70">Today</dt>
+          <dd className="mt-0.5 text-[16px] font-bold tabular-nums">
+            {todayViolations} violations
+          </dd>
+        </div>
+        <div>
+          <dt className="text-[12px] font-semibold opacity-70">Yesterday</dt>
+          <dd className="mt-0.5 text-[16px] font-bold tabular-nums">
+            {yesterdayViolations === null ? "—" : `${yesterdayViolations} violations`}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-[12px] font-semibold opacity-70">Deep Work today</dt>
+          <dd className="mt-0.5 text-[14px] font-bold tabular-nums">
+            {formatDeepWork(todayDeepWork)}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-[12px] font-semibold opacity-70">Yesterday</dt>
+          <dd className="mt-0.5 text-[14px] font-bold tabular-nums">
+            {yesterdayDeepWork === null ? "—" : formatDeepWork(yesterdayDeepWork)}
+          </dd>
+        </div>
+      </dl>
+    </section>
   );
+}
+
+function InsightSection({
+  title,
+  items,
+  tone,
+}: {
+  title: string;
+  items: ExecutionInsight[];
+  tone: "positive" | "negative";
+}) {
+  const Icon = tone === "positive" ? CheckCircle2 : CircleAlert;
+
+  return (
+    <section className="rounded-2xl border border-[#DEE2EA] bg-white px-6 py-5 shadow-[0_8px_24px_rgba(23,27,44,0.035)]">
+      <h2 className="text-[17px] font-bold text-[#252A3B]">{title}</h2>
+      <ul className="mt-3 divide-y divide-[#E8EAF0]">
+        {items.map((item) => (
+          <li key={item.area} className="flex gap-3 py-3.5 first:pt-1 last:pb-0">
+            <Icon
+              className={cn(
+                "mt-0.5 size-4 shrink-0",
+                tone === "positive" ? "text-[#16815A]" : "text-[#C33A30]"
+              )}
+            />
+            <div>
+              <p className="text-[13px] font-bold text-[#4A5265]">{item.area}</p>
+              <p className="mt-0.5 text-[14px] leading-5 text-[#727B8D]">
+                {item.detail}
+              </p>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function createComparisonRows(
+  yesterday: DailyExecutionMetrics | null,
+  today: DailyExecutionMetrics
+) {
+  const compareValues = (
+    todayValue: number,
+    yesterdayValue: number | null,
+    formatter: (amount: number) => string = String,
+    higherIsBetter = true,
+    changeFormatter: (amount: number) => string = formatter
+  ) => {
+    if (yesterdayValue === null) {
+      return {
+        yesterday: "—",
+        today: formatter(todayValue),
+        change: "—",
+        changeTone: "neutral" as const,
+      };
+    }
+
+    const difference = todayValue - yesterdayValue;
+    const improved = higherIsBetter ? difference > 0 : difference < 0;
+    const declined = higherIsBetter ? difference < 0 : difference > 0;
+
+    return {
+      yesterday: formatter(yesterdayValue),
+      today: formatter(todayValue),
+      change:
+        difference === 0
+          ? "No change"
+          : `${difference > 0 ? "+" : "−"}${changeFormatter(
+              Math.abs(difference)
+            )}`,
+      changeTone: improved
+        ? ("improvement" as const)
+        : declined
+          ? ("decline" as const)
+          : ("neutral" as const),
+    };
+  };
+  const value = (
+    metric: keyof DailyExecutionMetrics,
+    formatter: (amount: number) => string = String,
+    higherIsBetter = true,
+    changeFormatter: (amount: number) => string = formatter
+  ) =>
+    compareValues(
+      today[metric],
+      yesterday?.[metric] ?? null,
+      formatter,
+      higherIsBetter,
+      changeFormatter
+    );
+
+  return [
+    { label: "Deep Work", ...value("deepWorkMinutes", formatDeepWork) },
+    {
+      label: "Sessions Completed",
+      ...value(
+        "completedSessions",
+        (amount) => `${amount} / 3`,
+        true,
+        String
+      ),
+    },
+    { label: "Missed Sessions", ...value("missedSessions", String, false) },
+    { label: "Started Late", ...value("lateSessions", String, false) },
+    {
+      label: "Total Late Minutes",
+      ...value("totalLateMinutes", formatDeepWork, false),
+    },
+    { label: "Distracted", ...value("distractedSessions", String, false) },
+    {
+      label: "Violations",
+      ...compareValues(
+        getViolationCount(today),
+        yesterday === null ? null : getViolationCount(yesterday),
+        String,
+        false
+      ),
+    },
+    { label: "Tasks Completed", ...value("completedTasks") },
+    {
+      label: "Tracked Task Time",
+      ...value("trackedTaskTimeSeconds", formatTaskDuration),
+    },
+  ];
 }
