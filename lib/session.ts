@@ -40,6 +40,11 @@ export interface SessionTimeCorrectionResult {
   error: string | null;
 }
 
+export interface CompletedSessionEdit {
+  startTime: string;
+  finishTime: string;
+}
+
 /** Returns the display label for a session type. */
 export function getSessionLabel(sessionType: SessionType): string {
   return SESSION_SCHEDULE[sessionType].label;
@@ -619,6 +624,86 @@ export function correctActualSessionTime(
   return {
     session: { ...session, finishedAt: correctedTime.toISOString() },
     error: null,
+  };
+}
+
+/** Updates both boundaries of one completed record as a single correction. */
+export function editCompletedSession(
+  session: Session,
+  correction: CompletedSessionEdit,
+  timestamp = new Date()
+): SessionTimeCorrectionResult {
+  if (session.status !== "completed") {
+    return {
+      session,
+      error: "Only completed sessions can be edited here.",
+    };
+  }
+
+  const start = casablancaWallTimeToDate(session.date, correction.startTime);
+  const finish = casablancaWallTimeToDate(session.date, correction.finishTime);
+  const scheduledEnd = getScheduledSessionEnd(session);
+  const scheduledFinishLabel = formatClockTime(
+    SESSION_SCHEDULE[session.sessionType].plannedFinish
+  );
+
+  if (start === null || finish === null || scheduledEnd === null) {
+    return { session, error: "Enter valid start and finish times." };
+  }
+
+  if (start > scheduledEnd || finish > scheduledEnd) {
+    return {
+      session,
+      error: `Session times cannot be later than the official end time of ${scheduledFinishLabel}.`,
+    };
+  }
+
+  if (start > timestamp || finish > timestamp) {
+    return { session, error: "Session times cannot be in the future." };
+  }
+
+  if (finish < start) {
+    return {
+      session,
+      error: "Actual Finish cannot be earlier than Actual Start.",
+    };
+  }
+
+  if (hasTaskBefore(session.tasks, start)) {
+    return {
+      session,
+      error: "Actual Start cannot be later than an existing task time.",
+    };
+  }
+
+  if (hasTaskAfter(session.tasks, finish)) {
+    return {
+      session,
+      error: "Actual Finish cannot be earlier than an existing task time.",
+    };
+  }
+
+  return {
+    session: {
+      ...session,
+      startedAt: start.toISOString(),
+      finishedAt: finish.toISOString(),
+    },
+    error: null,
+  };
+}
+
+/** Reopens one completed record without discarding any execution data. */
+export function reopenCompletedSession(session: Session): Session {
+  if (session.status !== "completed" || getValidSessionStart(session) === null) {
+    return session;
+  }
+
+  return {
+    ...session,
+    finishedAt: null,
+    finishTarget: null,
+    status: "running",
   };
 }
 

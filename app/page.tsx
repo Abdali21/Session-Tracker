@@ -14,6 +14,7 @@ import { createDailySessionStore } from "@/lib/local-sessions";
 import {
   completeSessionTask,
   correctActualSessionTime,
+  editCompletedSession,
   finalizeRunningTaskAtSessionEnd,
   formatTodayDate,
   getUndoStartConfirmation,
@@ -21,6 +22,7 @@ import {
   startSessionTask,
   todayDateString,
   undoSessionStart,
+  reopenCompletedSession,
 } from "@/lib/session";
 import type { Session, SessionTask, SessionType } from "@/types/session";
 import { useAccountabilityReconciliation } from "@/lib/use-accountability-reconciliation";
@@ -150,6 +152,26 @@ export default function Home() {
       return result.session;
     });
     return error;
+  }
+
+  function editSession(
+    sessionType: SessionType,
+    startTime: string,
+    finishTime: string
+  ): string | null {
+    let error: string | null = null;
+    updateSession(sessionType, (session) => {
+      const result = editCompletedSession(session, { startTime, finishTime });
+      error = result.error;
+      return result.session;
+    });
+    return error;
+  }
+
+  function reopenSession(sessionType: SessionType) {
+    updateSession(sessionType, reopenCompletedSession);
+    setSessionErrors((current) => ({ ...current, [sessionType]: undefined }));
+    setTaskErrors((current) => ({ ...current, [sessionType]: undefined }));
   }
 
   function undoStart(sessionType: SessionType) {
@@ -348,6 +370,16 @@ export default function Home() {
                       "finish",
                       clockTime
                     )
+                  }
+                  onEditSession={(startTime, finishTime) =>
+                    editSession(
+                      selectedSession.sessionType,
+                      startTime,
+                      finishTime
+                    )
+                  }
+                  onReopen={() =>
+                    reopenSession(selectedSession.sessionType)
                   }
                   onUndoStart={() =>
                     undoStart(selectedSession.sessionType)

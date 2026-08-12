@@ -1,4 +1,11 @@
-import { CircleAlert, CircleCheck, CircleX, Clock3 } from "lucide-react";
+import {
+  CircleAlert,
+  CircleCheck,
+  CircleX,
+  Clock3,
+  RotateCcw,
+} from "lucide-react";
+import { SessionEditDialog } from "@/components/session-edit-dialog";
 import { SessionActionButton } from "@/components/session-action-button";
 import { EditableSessionTime } from "@/components/editable-session-time";
 import { SessionDurationCircle } from "@/components/session-duration-circle";
@@ -29,6 +36,8 @@ interface SessionCardProps {
   onDeleteTask: (taskId: string) => void;
   onActualStartChange: (clockTime: string) => string | null;
   onActualFinishChange: (clockTime: string) => string | null;
+  onEditSession: (startTime: string, finishTime: string) => string | null;
+  onReopen: () => void;
   onUndoStart: () => void;
   onDistractedChange: (distracted: boolean) => void;
   onDistractionReasonChange: (reason: string) => void;
@@ -47,6 +56,8 @@ export function SessionCard({
   onDeleteTask,
   onActualStartChange,
   onActualFinishChange,
+  onEditSession,
+  onReopen,
   onUndoStart,
   onDistractedChange,
   onDistractionReasonChange,
@@ -88,7 +99,7 @@ export function SessionCard({
           <EditableSessionTime
             label="Actual Start"
             value={session.startedAt}
-            editable={session.status === "running" || session.status === "completed"}
+            editable={session.status === "running"}
             onSave={onActualStartChange}
             onUndo={session.status === "running" ? onUndoStart : undefined}
           />
@@ -97,7 +108,7 @@ export function SessionCard({
           <EditableSessionTime
             label="Actual Finish"
             value={session.finishedAt}
-            editable={session.status === "completed"}
+            editable={false}
             onSave={onActualFinishChange}
           />
         </div>
@@ -237,7 +248,30 @@ export function SessionCard({
             {actionError}
           </p>
         ) : null}
-        <SessionActionButton status={session.status} onStart={onStart} onFinish={onFinish} />
+        {session.status === "completed" ? (
+          <div className="grid grid-cols-2 gap-3">
+            <SessionEditDialog
+              session={session}
+              onSave={onEditSession}
+              onReopen={onReopen}
+            />
+            <Button
+              type="button"
+              variant="outline"
+              onClick={onReopen}
+              className="h-12 w-full gap-2 rounded-[10px] text-[15px] font-semibold shadow-none"
+            >
+              <RotateCcw className="size-4" />
+              Reopen Session
+            </Button>
+          </div>
+        ) : (
+          <SessionActionButton
+            status={session.status}
+            onStart={onStart}
+            onFinish={onFinish}
+          />
+        )}
       </div>
     </section>
   );

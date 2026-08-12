@@ -46,6 +46,7 @@ const {
   casablancaWallTimeToDate,
   completeSessionTask,
   correctActualSessionTime,
+  editCompletedSession,
   evaluateDistractionRule,
   evaluateStartTimeRule,
   finalizeRunningTaskAtSessionEnd,
@@ -53,10 +54,12 @@ const {
   getSessionTimeValidationError,
   getTrackedTaskTime,
   resolveExpiredSession,
+  reopenCompletedSession,
   startSessionTask,
   undoSessionStart,
 } = require("../lib/session.ts");
 const { createDailySessionStore } = require("../lib/local-sessions.ts");
+const { getDailyExecutionMetrics } = require("../lib/report.ts");
 const { SESSION_SCHEDULE } = require("../types/session.ts");
 
 const storage = new Map();
@@ -402,6 +405,75 @@ function run() {
     assert.equal(correctedFinish.error, null);
     assert.equal(calculateDeepWorkDuration(correctedFinish.session), 85);
 
+    const editedCompleted = editCompletedSession(
+      correctionBase,
+      { startTime: "09:00", finishTime: "10:55" },
+      afterSkillCutoff
+    );
+    assert.equal(editedCompleted.error, null);
+    assert.equal(editedCompleted.session.id, correctionBase.id);
+    assert.equal(calculateDeepWorkDuration(editedCompleted.session), 115);
+
+    const preservedTasks = [
+      task({
+        id: "preserved",
+        date,
+        status: "completed",
+        start: "09:15",
+        finish: "09:45",
+      }),
+    ];
+    const recoverable = session({
+      date,
+      start: "09:00",
+      finish: "10:05",
+      distracted: true,
+      distractionReason: "Notification",
+      tasks: preservedTasks,
+    });
+    const recovered = reopenCompletedSession(recoverable);
+    assert.equal(recovered.id, recoverable.id);
+    assert.equal(recovered.status, "running");
+    assert.equal(recovered.startedAt, recoverable.startedAt);
+    assert.equal(recovered.finishedAt, null);
+    assert.strictEqual(recovered.tasks, preservedTasks);
+    assert.equal(recovered.distracted, true);
+    assert.equal(recovered.distractionReason, "Notification");
+
+    const recoveryStore = createDailySessionStore(date);
+    recoveryStore.update(() => [recovered]);
+    const persistedRecovery = createDailySessionStore(date).getSnapshot()[0];
+    assert.equal(persistedRecovery.id, recoverable.id);
+    assert.equal(persistedRecovery.status, "running");
+    assert.equal(persistedRecovery.finishedAt, null);
+    assert.equal(persistedRecovery.tasks[0].status, "completed");
+    assert.equal(persistedRecovery.distracted, true);
+
+    const correctedEnd = casablancaWallTimeToDate(date, "10:45");
+    assert.ok(correctedEnd);
+    const completedAgain = finalizeRunningTaskAtSessionEnd(
+      {
+        ...recovered,
+        status: "completed",
+        finishedAt: correctedEnd.toISOString(),
+      },
+      correctedEnd
+    );
+    assert.equal(completedAgain.id, recoverable.id);
+    assert.equal(completedAgain.status, "completed");
+    assert.equal(calculateDeepWorkDuration(completedAgain), 105);
+    assert.equal(completedAgain.tasks[0].status, "completed");
+
+    recoveryStore.update(() => [editedCompleted.session]);
+    const persistedEdit = createDailySessionStore(date).getSnapshot()[0];
+    assert.equal(persistedEdit.id, correctionBase.id);
+    assert.equal(calculateDeepWorkDuration(persistedEdit), 115);
+    assert.equal(
+      getDailyExecutionMetrics([persistedEdit], afterSkillCutoff)
+        .deepWorkMinutes,
+      115
+    );
+
     const negativeDuration = correctActualSessionTime(
       correctedFinish.session,
       "finish",
@@ -583,7 +655,7 @@ function run() {
     SESSION_SCHEDULE.client_acquisition.plannedFinish = originalClientFinish;
   }
 
-  console.log("Session execution verification: 27 scenarios passed.");
+  console.log("Session execution verification passed.");
 }
 
 run();
