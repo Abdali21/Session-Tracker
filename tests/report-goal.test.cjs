@@ -87,6 +87,12 @@ const sessions = [
         status: "completed",
         startedAt: iso("2026-08-11", "09:30"),
         finishedAt: iso("2026-08-11", "10:00"),
+        workIntervals: [
+          {
+            startedAt: iso("2026-08-11", "09:30"),
+            endedAt: iso("2026-08-11", "10:00"),
+          },
+        ],
         createdAt: iso("2026-08-11", "09:20"),
         updatedAt: iso("2026-08-11", "10:00"),
       },
@@ -119,7 +125,7 @@ const metrics = getDailyExecutionMetrics(
   casablancaWallTimeToDate("2026-08-11", "21:00")
 );
 assert.deepEqual(metrics, {
-  deepWorkMinutes: 405,
+  deepWorkMinutes: 30,
   completedSessions: 2,
   missedSessions: 1,
   lateSessions: 1,
@@ -136,12 +142,12 @@ const goal = getWeeklyGoalSummary(
   ],
   casablancaWallTimeToDate("2026-08-11", "21:00")
 );
-assert.equal(goal.currentMinutes, 405);
-assert.equal(goal.remainingMinutes, 2595);
-assert.equal(goal.progressPercent, 14);
+assert.equal(goal.currentMinutes, 30);
+assert.equal(goal.remainingMinutes, 2970);
+assert.equal(goal.progressPercent, 1);
 assert.deepEqual(goal.dailyMinutes, [
   { date: "2026-08-10", minutes: null },
-  { date: "2026-08-11", minutes: 405 },
+  { date: "2026-08-11", minutes: 30 },
 ]);
 
 function executionMetrics(overrides = {}) {

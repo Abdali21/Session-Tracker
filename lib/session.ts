@@ -242,30 +242,28 @@ export function getEffectiveSessionEnd(
 export function calculateDeepWorkDuration(
   session: Session,
   timestamp = new Date()
-): number | null {
-  const effectiveEnd = getEffectiveSessionEnd(session, timestamp);
-  const startMinutes = zonedMinutesFromSessionDate(
-    session.startedAt,
-    session.date
-  );
-  const endMinutes = zonedMinutesFromSessionDate(
-    effectiveEnd?.toISOString() ?? null,
-    session.date
-  );
-
-  if (
-    effectiveEnd === null ||
-    startMinutes === null ||
-    endMinutes === null ||
-    endMinutes < startMinutes
-  ) {
-    return null;
-  }
-
-  return endMinutes - startMinutes;
+): number {
+  return Math.floor(calculateDeepWorkDurationSeconds(session, timestamp) / 60);
 }
 
 export const calculateDeepWork = calculateDeepWorkDuration;
+
+/**
+ * The single source of truth for Deep Work. Valid task intervals are merged
+ * before summing so corrupt/legacy overlaps can never be double-counted.
+ */
+export function calculateDeepWorkDurationSeconds(
+  session: Session,
+  timestamp = new Date()
+): number {
+  return sumIntervals(
+    mergeIntervals(
+      session.tasks.flatMap((task) =>
+        getValidTaskIntervals(task, session, timestamp)
+      )
+    )
+  );
+}
 
 export function resolveSessionStatus(
   session: Session,
@@ -352,41 +350,17 @@ export function calculateTaskDuration(
   task: SessionTask,
   session: Session,
   timestamp = new Date()
-): number | null {
-  const taskStart = dateFromIso(task.startedAt);
-  const sessionStart = getValidSessionStart(session);
-  const sessionEnd = getEffectiveSessionEnd(session, timestamp);
-  if (
-    taskStart === null ||
-    sessionStart === null ||
-    sessionEnd === null ||
-    taskStart < sessionStart ||
-    taskStart > sessionEnd
-  ) {
-    return null;
-  }
-
-  const taskEnd =
-    task.status === "completed"
-      ? dateFromIso(task.finishedAt)
-      : task.status === "running"
-        ? sessionEnd
-        : null;
-  if (taskEnd === null || taskEnd < taskStart || taskEnd > sessionEnd) {
-    return null;
-  }
-
-  return Math.floor((taskEnd.getTime() - taskStart.getTime()) / 1_000);
+): number {
+  return sumIntervals(
+    mergeIntervals(getValidTaskIntervals(task, session, timestamp))
+  );
 }
 
 export function getTrackedTaskTime(
   session: Session,
   timestamp = new Date()
 ): number {
-  return session.tasks.reduce((total, task) => {
-    if (task.status !== "completed") return total;
-    return total + (calculateTaskDuration(task, session, timestamp) ?? 0);
-  }, 0);
+  return calculateDeepWorkDurationSeconds(session, timestamp);
 }
 
 export function finalizeRunningTaskAtSessionEnd(
@@ -399,7 +373,8 @@ export function finalizeRunningTaskAtSessionEnd(
     if (task.status !== "running") return task;
 
     changed = true;
-    const taskStart = dateFromIso(task.startedAt);
+    const openInterval = getOpenInterval(task);
+    const taskStart = dateFromIso(openInterval?.startedAt ?? null);
     if (
       sessionStart === null ||
       taskStart === null ||
@@ -408,16 +383,20 @@ export function finalizeRunningTaskAtSessionEnd(
     ) {
       return {
         ...task,
-        status: "pending" as const,
-        finishedAt: null,
+        status: getStoredIntervals(task).some((interval) => interval.endedAt !== null)
+          ? ("paused" as const)
+          : ("pending" as const),
+        workIntervals: getStoredIntervals(task).filter(
+          (interval) => interval.endedAt !== null
+        ),
         updatedAt: effectiveEnd.toISOString(),
       };
     }
 
     return {
       ...task,
-      status: "completed" as const,
-      finishedAt: effectiveEnd.toISOString(),
+      status: "paused" as const,
+      workIntervals: closeOpenTaskInterval(task, effectiveEnd),
       updatedAt: effectiveEnd.toISOString(),
     };
   });
@@ -441,15 +420,8 @@ export function startSessionTask(
   }
 
   const task = session.tasks.find((candidate) => candidate.id === taskId);
-  if (!task || task.status !== "pending") {
+  if (!task || task.status === "completed" || task.status === "running") {
     return { session, error: null };
-  }
-
-  if (session.tasks.some((candidate) => candidate.status === "running")) {
-    return {
-      session,
-      error: "Complete the current task before starting another.",
-    };
   }
 
   const sessionStart = getValidSessionStart(session);
@@ -475,8 +447,59 @@ export function startSessionTask(
           ? {
               ...candidate,
               status: "running",
-              startedAt: timestampIso,
+              startedAt: candidate.startedAt ?? timestampIso,
               finishedAt: null,
+              workIntervals: [
+                ...getStoredIntervals(candidate).filter(
+                  (interval) => interval.endedAt !== null
+                ),
+                { startedAt: timestampIso, endedAt: null },
+              ],
+              updatedAt: timestampIso,
+            }
+          : candidate.status === "running"
+            ? {
+                ...candidate,
+                status: "paused" as const,
+                workIntervals: closeOpenTaskInterval(candidate, timestamp),
+                updatedAt: timestampIso,
+              }
+            : candidate
+      ),
+    },
+    error: null,
+  };
+}
+
+export function pauseSessionTask(
+  session: Session,
+  taskId: string,
+  timestamp = new Date()
+): SessionTaskMutationResult {
+  const resolvedSession = resolveExpiredSession(session, timestamp);
+  if (resolvedSession !== session) {
+    return { session: resolvedSession, error: null };
+  }
+
+  const task = session.tasks.find((candidate) => candidate.id === taskId);
+  if (!task || task.status !== "running") return { session, error: null };
+
+  const openInterval = getOpenInterval(task);
+  const intervalStart = dateFromIso(openInterval?.startedAt ?? null);
+  if (intervalStart === null || timestamp < intervalStart) {
+    return { session, error: "Task pause time cannot be before its start." };
+  }
+
+  const timestampIso = timestamp.toISOString();
+  return {
+    session: {
+      ...session,
+      tasks: session.tasks.map((candidate) =>
+        candidate.id === taskId
+          ? {
+              ...candidate,
+              status: "paused",
+              workIntervals: closeOpenTaskInterval(candidate, timestamp),
               updatedAt: timestampIso,
             }
           : candidate
@@ -504,12 +527,13 @@ export function completeSessionTask(
   }
 
   const task = session.tasks.find((candidate) => candidate.id === taskId);
-  if (!task || task.status !== "running") {
+  if (!task || task.status === "completed") {
     return { session, error: null };
   }
 
-  const taskStart = dateFromIso(task.startedAt);
-  if (taskStart === null || timestamp < taskStart) {
+  const openInterval = task.status === "running" ? getOpenInterval(task) : null;
+  const taskStart = dateFromIso(openInterval?.startedAt ?? null);
+  if (task.status === "running" && (taskStart === null || timestamp < taskStart)) {
     return { session, error: "Task finish time cannot be before its start." };
   }
 
@@ -523,12 +547,39 @@ export function completeSessionTask(
               ...candidate,
               status: "completed",
               finishedAt: timestampIso,
+              workIntervals:
+                candidate.status === "running"
+                  ? closeOpenTaskInterval(candidate, timestamp)
+                  : getStoredIntervals(candidate).filter(
+                      (interval) => interval.endedAt !== null
+                    ),
               updatedAt: timestampIso,
             }
           : candidate
       ),
     },
     error: null,
+  };
+}
+
+export function reopenSessionTask(
+  session: Session,
+  taskId: string,
+  timestamp = new Date()
+): Session {
+  const timestampIso = timestamp.toISOString();
+  return {
+    ...session,
+    tasks: session.tasks.map((task) =>
+      task.id === taskId && task.status === "completed"
+        ? {
+            ...task,
+            status: getStoredIntervals(task).length > 0 ? "paused" : "pending",
+            finishedAt: null,
+            updatedAt: timestampIso,
+          }
+        : task
+    ),
   };
 }
 
@@ -715,7 +766,8 @@ export function getUndoStartConfirmation(session: Session): string {
       (task) =>
         task.status !== "pending" ||
         task.startedAt !== null ||
-        task.finishedAt !== null
+        task.finishedAt !== null ||
+        getStoredIntervals(task).length > 0
     );
 
   return hasExecutionData
@@ -748,6 +800,7 @@ export function undoSessionStart(
             status: "pending",
             startedAt: null,
             finishedAt: null,
+            workIntervals: [],
             updatedAt: timestampIso,
           }
     ),
@@ -784,6 +837,18 @@ export function formatTaskDuration(totalSeconds: number): string {
 
   if (minutes > 0) return `${minutes}m`;
   return `${seconds}s`;
+}
+
+/** Formats a live duration as HH:MM:SS. */
+export function formatLiveDuration(totalSeconds: number): string {
+  const safeSeconds = Math.max(0, Math.floor(totalSeconds));
+  const hours = Math.floor(safeSeconds / 3_600);
+  const minutes = Math.floor((safeSeconds % 3_600) / 60);
+  const seconds = safeSeconds % 60;
+
+  return [hours, minutes, seconds]
+    .map((value) => String(value).padStart(2, "0"))
+    .join(":");
 }
 
 /** Returns the Casablanca calendar date in YYYY-MM-DD format. */
@@ -886,7 +951,7 @@ export function getSessionDuration(
   const plannedDurationMinutes = plannedFinishMinutes - plannedStartMinutes;
 
   if (session.status === "completed" || session.status === "running") {
-    const actualMinutes = calculateDeepWorkDuration(session, timestamp);
+    const actualMinutes = calculateSessionElapsedDuration(session, timestamp);
     if (actualMinutes === null) {
       return { minutes: null, progress: 0, state: "invalid" };
     }
@@ -903,6 +968,18 @@ export function getSessionDuration(
   }
 
   return { minutes: null, progress: 0, state: "empty" };
+}
+
+/** Session elapsed time remains independent from task-based Deep Work. */
+export function calculateSessionElapsedDuration(
+  session: Session,
+  timestamp = new Date()
+): number | null {
+  const start = getValidSessionStart(session);
+  const end = getEffectiveSessionEnd(session, timestamp);
+  if (start === null || end === null || end < start) return null;
+
+  return Math.floor((end.getTime() - start.getTime()) / 60_000);
 }
 
 export function formatSessionDuration(minutes: number): string {
@@ -931,8 +1008,12 @@ function stopTasksForMissedSession(
     changed = true;
     return {
       ...task,
-      status: "pending" as const,
-      finishedAt: null,
+      status: getStoredIntervals(task).some((interval) => interval.endedAt !== null)
+        ? ("paused" as const)
+        : ("pending" as const),
+      workIntervals: getStoredIntervals(task).filter(
+        (interval) => interval.endedAt !== null
+      ),
       updatedAt: timestamp.toISOString(),
     };
   });
@@ -946,7 +1027,15 @@ function hasTaskBefore(tasks: SessionTask[], boundary: Date): boolean {
     const finish = dateFromIso(task.finishedAt);
     return (
       (start !== null && start < boundary) ||
-      (finish !== null && finish < boundary)
+      (finish !== null && finish < boundary) ||
+      getStoredIntervals(task).some((interval) => {
+        const intervalStart = dateFromIso(interval.startedAt);
+        const intervalEnd = dateFromIso(interval.endedAt);
+        return (
+          (intervalStart !== null && intervalStart < boundary) ||
+          (intervalEnd !== null && intervalEnd < boundary)
+        );
+      })
     );
   });
 }
@@ -957,9 +1046,105 @@ function hasTaskAfter(tasks: SessionTask[], boundary: Date): boolean {
     const finish = dateFromIso(task.finishedAt);
     return (
       (start !== null && start > boundary) ||
-      (finish !== null && finish > boundary)
+      (finish !== null && finish > boundary) ||
+      getStoredIntervals(task).some((interval) => {
+        const intervalStart = dateFromIso(interval.startedAt);
+        const intervalEnd = dateFromIso(interval.endedAt);
+        return (
+          (intervalStart !== null && intervalStart > boundary) ||
+          (intervalEnd !== null && intervalEnd > boundary)
+        );
+      })
     );
   });
+}
+
+interface NumericInterval {
+  start: number;
+  end: number;
+}
+
+function getValidTaskIntervals(
+  task: SessionTask,
+  session: Session,
+  timestamp: Date
+): NumericInterval[] {
+  const sessionStart = getValidSessionStart(session);
+  const sessionEnd = getEffectiveSessionEnd(session, timestamp);
+  if (sessionStart === null || sessionEnd === null) return [];
+
+  const sessionStartMs = sessionStart.getTime();
+  const sessionEndMs = sessionEnd.getTime();
+
+  return getStoredIntervals(task).flatMap((interval) => {
+    const start = dateFromIso(interval.startedAt);
+    const storedEnd = dateFromIso(interval.endedAt);
+    const end =
+      storedEnd ??
+      (task.status === "running" && interval === getOpenInterval(task)
+        ? sessionEnd
+        : null);
+
+    if (
+      start === null ||
+      end === null ||
+      end < start ||
+      start.getTime() < sessionStartMs ||
+      end.getTime() > sessionEndMs
+    ) {
+      return [];
+    }
+
+    return [{ start: start.getTime(), end: end.getTime() }];
+  });
+}
+
+function getOpenInterval(task: SessionTask) {
+  return [...getStoredIntervals(task)]
+    .reverse()
+    .find((interval) => interval.endedAt === null);
+}
+
+function closeOpenTaskInterval(task: SessionTask, timestamp: Date) {
+  const intervals = getStoredIntervals(task);
+  const openIndex = intervals.findLastIndex((interval) => interval.endedAt === null);
+  return intervals.map((interval, index) => {
+    if (index !== openIndex) return interval;
+    const start = dateFromIso(interval.startedAt);
+    if (start === null || timestamp < start) return interval;
+    return { ...interval, endedAt: timestamp.toISOString() };
+  });
+}
+
+function getStoredIntervals(task: SessionTask) {
+  return Array.isArray(task.workIntervals) ? task.workIntervals : [];
+}
+
+function mergeIntervals(intervals: NumericInterval[]): NumericInterval[] {
+  const sorted = [...intervals].sort(
+    (left, right) => left.start - right.start || left.end - right.end
+  );
+  const merged: NumericInterval[] = [];
+
+  sorted.forEach((interval) => {
+    const previous = merged.at(-1);
+    if (!previous || interval.start > previous.end) {
+      merged.push({ ...interval });
+      return;
+    }
+    previous.end = Math.max(previous.end, interval.end);
+  });
+
+  return merged;
+}
+
+function sumIntervals(intervals: NumericInterval[]): number {
+  return Math.floor(
+    intervals.reduce(
+      (total, interval) => total + interval.end - interval.start,
+      0
+    ) / 1_000
+  );
 }
 
 function formatClockTime(time: string): string {

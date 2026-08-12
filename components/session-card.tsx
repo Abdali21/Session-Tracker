@@ -18,6 +18,7 @@ import { cn } from "@/lib/utils";
 import {
   calculateLateMinutes,
   evaluateStartTimeRule,
+  formatLiveDuration,
   formatTaskDuration,
   getSessionLabel,
   getSessionScheduleLabel,
@@ -32,7 +33,10 @@ interface SessionCardProps {
   onFinish: () => void;
   onAddTask: (title: string) => void;
   onStartTask: (taskId: string) => void;
+  onPauseTask: (taskId: string) => void;
   onCompleteTask: (taskId: string) => void;
+  onReopenTask: (taskId: string) => void;
+  onEditTask: (taskId: string, title: string) => void;
   onDeleteTask: (taskId: string) => void;
   onActualStartChange: (clockTime: string) => string | null;
   onActualFinishChange: (clockTime: string) => string | null;
@@ -52,7 +56,10 @@ export function SessionCard({
   onFinish,
   onAddTask,
   onStartTask,
+  onPauseTask,
   onCompleteTask,
+  onReopenTask,
+  onEditTask,
   onDeleteTask,
   onActualStartChange,
   onActualFinishChange,
@@ -73,6 +80,10 @@ export function SessionCard({
     session.status === "missed" ||
     session.status === "skipped";
   const trackedTaskTime = getTrackedTaskTime(session, timestamp);
+  const completedTaskCount = session.tasks.filter(
+    (task) => task.status === "completed"
+  ).length;
+  const hasActiveTask = session.tasks.some((task) => task.status === "running");
 
   return (
     <section className="overflow-hidden rounded-2xl border border-[#DEE2EA] bg-white shadow-[0_12px_32px_rgba(23,27,44,0.055)]">
@@ -207,14 +218,36 @@ export function SessionCard({
         </div>
 
         <div className="border-t border-[#E7E9EF] py-6">
-          <div className="mb-3 flex items-center justify-between gap-4">
-            <h3 className="text-[15px] font-bold text-[#262B3B]">Tasks</h3>
-            <span className="text-[13px] font-semibold tabular-nums text-[#7E8799]">
-              Tracked: {formatTaskDuration(trackedTaskTime)}
-            </span>
+          <div className="mb-4 flex items-center justify-between gap-5">
+            <div>
+              <h3 className="text-[15px] font-bold text-[#262B3B]">Tasks</h3>
+              <p className="mt-0.5 text-[12px] text-[#8A92A3]">
+                Deep Work only counts while a task is active.
+              </p>
+            </div>
+            <div className="flex shrink-0 items-center divide-x divide-[#E0E4EB] rounded-[10px] border border-[#E1E4EB] bg-[#FAFBFC] px-1 py-2">
+              <div className="px-3 text-right">
+                <p className="text-[10px] font-bold uppercase tracking-[0.06em] text-[#969EAE]">
+                  Completed
+                </p>
+                <p className="mt-0.5 text-[13px] font-bold tabular-nums text-[#4D5568]">
+                  {completedTaskCount} / {session.tasks.length}
+                </p>
+              </div>
+              <div className="min-w-[106px] px-3 text-right">
+                <p className="text-[10px] font-bold uppercase tracking-[0.06em] text-[#969EAE]">
+                  Deep Work
+                </p>
+                <p className="mt-0.5 text-[13px] font-bold tabular-nums text-brand-deep">
+                  {hasActiveTask
+                    ? formatLiveDuration(trackedTaskTime)
+                    : formatTaskDuration(trackedTaskTime)}
+                </p>
+              </div>
+            </div>
           </div>
           {session.tasks.length > 0 ? (
-            <ul className="divide-y divide-[#E8EAF0] border-y border-[#E8EAF0]">
+            <ul className="space-y-2 rounded-[14px] border border-[#E5E8EE] bg-[#F7F8FA] p-2">
               {session.tasks.map((task) => (
                 <TaskItem
                   key={task.id}
@@ -222,14 +255,17 @@ export function SessionCard({
                   session={session}
                   timestamp={timestamp}
                   onStart={() => onStartTask(task.id)}
+                  onPause={() => onPauseTask(task.id)}
                   onComplete={() => onCompleteTask(task.id)}
+                  onReopen={() => onReopenTask(task.id)}
+                  onEdit={(title) => onEditTask(task.id, title)}
                   onDelete={() => onDeleteTask(task.id)}
                 />
               ))}
             </ul>
           ) : (
-            <p className="border-y border-[#E8EAF0] py-5 text-[14px] text-[#9199A8]">
-              No tasks yet
+            <p className="rounded-[12px] border border-dashed border-[#DDE1E9] bg-[#FAFBFC] py-7 text-center text-[13px] text-[#8C95A6]">
+              Add a task to begin tracking Deep Work.
             </p>
           )}
           {taskError ? (

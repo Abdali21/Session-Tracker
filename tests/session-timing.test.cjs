@@ -41,6 +41,7 @@ Module._extensions[".ts"] = function transpileTypeScript(module, filename) {
 
 const {
   calculateDeepWorkDuration,
+  calculateSessionElapsedDuration,
   calculateLateMinutes,
   calculateTaskDuration,
   casablancaWallTimeToDate,
@@ -53,6 +54,7 @@ const {
   getSessionExecutionResult,
   getSessionTimeValidationError,
   getTrackedTaskTime,
+  pauseSessionTask,
   resolveExpiredSession,
   reopenCompletedSession,
   startSessionTask,
@@ -91,12 +93,18 @@ function task({
   finish = null,
 }) {
   const createdAt = toIso(date, "08:00");
+  const startedAt = start === null ? null : toIso(date, start);
+  const finishedAt = finish === null ? null : toIso(date, finish);
   return {
     id,
     title: `Task ${id}`,
     status,
-    startedAt: start === null ? null : toIso(date, start),
-    finishedAt: finish === null ? null : toIso(date, finish),
+    startedAt,
+    finishedAt,
+    workIntervals:
+      startedAt === null
+        ? []
+        : [{ startedAt, endedAt: status === "running" ? null : finishedAt }],
     createdAt,
     updatedAt: finish === null ? createdAt : toIso(date, finish),
   };
@@ -247,6 +255,102 @@ function run() {
     });
     assert.equal(getTrackedTaskTime(twoTaskSession), 75 * 60);
 
+    const overlappingSession = session({
+      date,
+      start: "09:00",
+      finish: "11:00",
+      tasks: [
+        task({ id: "overlap-a", date, status: "completed", start: "09:10", finish: "10:00" }),
+        task({ id: "overlap-b", date, status: "completed", start: "09:30", finish: "10:30" }),
+      ],
+    });
+    assert.equal(
+      calculateDeepWorkDuration(overlappingSession),
+      80,
+      "Overlapping corrupt intervals are merged instead of double-counted"
+    );
+
+    const intervalSession = session({
+      date,
+      start: "09:00",
+      tasks: [task({ id: "focus", date })],
+    });
+    assert.equal(
+      calculateDeepWorkDuration(
+        intervalSession,
+        casablancaWallTimeToDate(date, "09:20")
+      ),
+      0,
+      "A running session without an active task records no Deep Work"
+    );
+    const intervalStarted = startSessionTask(
+      intervalSession,
+      "focus",
+      casablancaWallTimeToDate(date, "09:20")
+    ).session;
+    const intervalPaused = pauseSessionTask(
+      intervalStarted,
+      "focus",
+      casablancaWallTimeToDate(date, "09:50")
+    ).session;
+    assert.equal(calculateDeepWorkDuration(intervalPaused), 30);
+    const intervalResumed = startSessionTask(
+      intervalPaused,
+      "focus",
+      casablancaWallTimeToDate(date, "10:10")
+    ).session;
+    const intervalCompleted = completeSessionTask(
+      intervalResumed,
+      "focus",
+      casablancaWallTimeToDate(date, "10:40")
+    ).session;
+    assert.equal(intervalCompleted.tasks[0].workIntervals.length, 2);
+    assert.equal(calculateDeepWorkDuration(intervalCompleted), 60);
+    assert.equal(
+      calculateSessionElapsedDuration(
+        { ...intervalCompleted, status: "completed", finishedAt: toIso(date, "11:00") }
+      ),
+      120,
+      "Session Duration remains independent from task-based Deep Work"
+    );
+
+    const persistenceDate = "2026-08-15";
+    const persistenceBase = session({
+      date: persistenceDate,
+      start: "09:00",
+      tasks: [task({ id: "persisted", date: persistenceDate })],
+    });
+    const persistedRunning = startSessionTask(
+      persistenceBase,
+      "persisted",
+      casablancaWallTimeToDate(persistenceDate, "09:10")
+    ).session;
+    createDailySessionStore(persistenceDate).update(() => [persistedRunning]);
+    const refreshedRunning = createDailySessionStore(persistenceDate).getSnapshot()[0];
+    assert.equal(refreshedRunning.tasks[0].status, "running");
+    assert.equal(
+      calculateDeepWorkDuration(
+        refreshedRunning,
+        casablancaWallTimeToDate(persistenceDate, "09:25")
+      ),
+      15
+    );
+    const persistedPaused = pauseSessionTask(
+      refreshedRunning,
+      "persisted",
+      casablancaWallTimeToDate(persistenceDate, "09:25")
+    ).session;
+    createDailySessionStore(persistenceDate).update(() => [persistedPaused]);
+    const refreshedPaused = createDailySessionStore(persistenceDate).getSnapshot()[0];
+    assert.equal(
+      calculateDeepWorkDuration(
+        refreshedPaused,
+        casablancaWallTimeToDate(persistenceDate, "10:25")
+      ),
+      15,
+      "Paused tasks do not accumulate time after refresh"
+    );
+
     const parallelBase = session({
       date,
       start: "09:00",
@@ -263,11 +367,9 @@ function run() {
       "b",
       casablancaWallTimeToDate(date, "09:15")
     );
-    assert.equal(
-      secondAttempt.error,
-      "Complete the current task before starting another."
-    );
-    assert.equal(secondAttempt.session.tasks[1].status, "pending");
+    assert.equal(secondAttempt.error, null);
+    assert.equal(secondAttempt.session.tasks[0].status, "paused");
+    assert.equal(secondAttempt.session.tasks[1].status, "running");
 
     const autoEndBase = session({
       date,
@@ -278,8 +380,8 @@ function run() {
     });
     const autoEnded = resolveExpiredSession(autoEndBase, afterSkillCutoff);
     assert.equal(autoEnded.status, "completed");
-    assert.equal(autoEnded.tasks[0].status, "completed");
-    assert.equal(autoEnded.tasks[0].finishedAt, toIso(date, "11:00"));
+    assert.equal(autoEnded.tasks[0].status, "paused");
+    assert.equal(autoEnded.tasks[0].workIntervals[0].endedAt, toIso(date, "11:00"));
     assert.equal(calculateTaskDuration(autoEnded.tasks[0], autoEnded), 30 * 60);
 
     const manualEndTime = casablancaWallTimeToDate(date, "10:42");
@@ -299,11 +401,32 @@ function run() {
       },
       manualEndTime
     );
-    assert.equal(manuallyEnded.tasks[0].finishedAt, toIso(date, "10:42"));
+    assert.equal(manuallyEnded.tasks[0].workIntervals[0].endedAt, toIso(date, "10:42"));
     assert.equal(
       calculateTaskDuration(manuallyEnded.tasks[0], manuallyEnded),
       37 * 60
     );
+    const reopenedManual = reopenCompletedSession(manuallyEnded);
+    const resumedManual = startSessionTask(
+      reopenedManual,
+      "manual",
+      casablancaWallTimeToDate(date, "10:50")
+    ).session;
+    const completedManual = completeSessionTask(
+      resumedManual,
+      "manual",
+      casablancaWallTimeToDate(date, "10:55")
+    ).session;
+    assert.equal(completedManual.tasks[0].workIntervals.length, 2);
+    assert.equal(calculateDeepWorkDuration(completedManual), 42);
+
+    const neverStarted = completeSessionTask(
+      session({ date, start: "09:00", tasks: [task({ id: "zero", date })] }),
+      "zero",
+      casablancaWallTimeToDate(date, "09:30")
+    ).session;
+    assert.equal(neverStarted.tasks[0].status, "completed");
+    assert.equal(calculateDeepWorkDuration(neverStarted), 0);
 
     const closedDate = "2026-08-12";
     const closedSession = session({
@@ -330,9 +453,9 @@ function run() {
     const reopened = createDailySessionStore(closedDate).getSnapshot()[0];
     assert.equal(reopened.status, "completed");
     assert.equal(reopened.finishedAt, toIso(closedDate, "11:00"));
-    assert.equal(reopened.tasks[0].status, "completed");
-    assert.equal(reopened.tasks[0].finishedAt, toIso(closedDate, "11:00"));
-    assert.equal(calculateDeepWorkDuration(reopened), 103);
+    assert.equal(reopened.tasks[0].status, "paused");
+    assert.equal(reopened.tasks[0].workIntervals[0].endedAt, toIso(closedDate, "11:00"));
+    assert.equal(calculateDeepWorkDuration(reopened), 30);
 
     const legacyDate = "2026-08-13";
     storage.set(
@@ -367,14 +490,14 @@ function run() {
     assert.equal(legacy.distractionReason, null);
     assert.equal(legacy.tasks[0].status, "completed");
     assert.equal(legacy.tasks[0].startedAt, null);
-    assert.equal(calculateTaskDuration(legacy.tasks[0], legacy), null);
+    assert.equal(calculateTaskDuration(legacy.tasks[0], legacy), 0);
 
     const afternoon = session({
       date,
       sessionType: "client_acquisition",
       start: "14:36",
     });
-    assert.equal(calculateDeepWorkDuration(afternoon, afterClientCutoff), 84);
+    assert.equal(calculateDeepWorkDuration(afternoon, afterClientCutoff), 0);
 
     const completedTask = completeSessionTask(
       firstStarted.session,
@@ -395,7 +518,7 @@ function run() {
     );
     assert.equal(correctedStart.error, null);
     assert.equal(calculateLateMinutes(correctedStart.session), 15);
-    assert.equal(calculateDeepWorkDuration(correctedStart.session), 87);
+    assert.equal(calculateDeepWorkDuration(correctedStart.session), 0);
 
     const correctedFinish = correctActualSessionTime(
       correctedStart.session,
@@ -403,7 +526,7 @@ function run() {
       "10:40"
     );
     assert.equal(correctedFinish.error, null);
-    assert.equal(calculateDeepWorkDuration(correctedFinish.session), 85);
+    assert.equal(calculateDeepWorkDuration(correctedFinish.session), 0);
 
     const editedCompleted = editCompletedSession(
       correctionBase,
@@ -412,7 +535,7 @@ function run() {
     );
     assert.equal(editedCompleted.error, null);
     assert.equal(editedCompleted.session.id, correctionBase.id);
-    assert.equal(calculateDeepWorkDuration(editedCompleted.session), 115);
+    assert.equal(calculateDeepWorkDuration(editedCompleted.session), 0);
 
     const preservedTasks = [
       task({
@@ -461,17 +584,17 @@ function run() {
     );
     assert.equal(completedAgain.id, recoverable.id);
     assert.equal(completedAgain.status, "completed");
-    assert.equal(calculateDeepWorkDuration(completedAgain), 105);
+    assert.equal(calculateDeepWorkDuration(completedAgain), 30);
     assert.equal(completedAgain.tasks[0].status, "completed");
 
     recoveryStore.update(() => [editedCompleted.session]);
     const persistedEdit = createDailySessionStore(date).getSnapshot()[0];
     assert.equal(persistedEdit.id, correctionBase.id);
-    assert.equal(calculateDeepWorkDuration(persistedEdit), 115);
+    assert.equal(calculateDeepWorkDuration(persistedEdit), 0);
     assert.equal(
       getDailyExecutionMetrics([persistedEdit], afterSkillCutoff)
         .deepWorkMinutes,
-      115
+      0
     );
 
     const negativeDuration = correctActualSessionTime(
@@ -585,7 +708,7 @@ function run() {
       status: "completed",
       finishedAt: earlyFinishTime.toISOString(),
     };
-    assert.equal(calculateDeepWorkDuration(earlyCompleted), 30);
+    assert.equal(calculateDeepWorkDuration(earlyCompleted), 0);
 
     const forgottenEarly = resolveExpiredSession(
       earlyRunning,
@@ -593,7 +716,7 @@ function run() {
     );
     assert.equal(forgottenEarly.status, "completed");
     assert.equal(forgottenEarly.finishedAt, toIso(earlyDate, "17:00"));
-    assert.equal(calculateDeepWorkDuration(forgottenEarly), 220);
+    assert.equal(calculateDeepWorkDuration(forgottenEarly), 0);
 
     const undoBase = {
       ...earlyRunning,
@@ -615,6 +738,7 @@ function run() {
     assert.equal(undone.distracted, null);
     assert.equal(undone.tasks[0].status, "pending");
     assert.equal(undone.tasks[0].startedAt, null);
+    assert.deepEqual(undone.tasks[0].workIntervals, []);
 
     const correctedEarlyStart = correctActualSessionTime(
       earlyRunning,
@@ -626,7 +750,7 @@ function run() {
     assert.equal(evaluateStartTimeRule(correctedEarlyStart.session), "respected");
     assert.equal(
       calculateDeepWorkDuration(correctedEarlyStart.session, correctionNow),
-      15
+      0
     );
 
     const futureStart = correctActualSessionTime(
@@ -644,7 +768,7 @@ function run() {
       afterOfficialEnd
     );
     assert.equal(correctedEarlyFinish.error, null);
-    assert.equal(calculateDeepWorkDuration(correctedEarlyFinish.session), 195);
+    assert.equal(calculateDeepWorkDuration(correctedEarlyFinish.session), 0);
 
     assert.equal(
       fs.existsSync(path.join(projectRoot, "components", "session-timeline.tsx")),

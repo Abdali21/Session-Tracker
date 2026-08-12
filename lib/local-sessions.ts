@@ -3,14 +3,15 @@ import {
   type SessionStatus,
   type SessionTask,
   type SessionTaskStatus,
+  type SessionTaskWorkInterval,
   type SessionType,
   SESSION_TYPES,
 } from "@/types/session";
 import { resolveExpiredSessions } from "@/lib/session";
 
 const STORAGE_KEY_PREFIX = "work-session-tracker:daily-sessions:";
-const STORAGE_VERSION = 2;
-const LEGACY_STORAGE_VERSION = 1;
+const STORAGE_VERSION = 3;
+const LEGACY_STORAGE_VERSIONS = new Set([1, 2]);
 const LOCAL_SESSIONS_CHANGED_EVENT =
   "work-session-tracker:local-sessions-changed";
 const SESSION_STATUSES = new Set<SessionStatus>([
@@ -23,6 +24,7 @@ const SESSION_STATUSES = new Set<SessionStatus>([
 const TASK_STATUSES = new Set<SessionTaskStatus>([
   "pending",
   "running",
+  "paused",
   "completed",
 ]);
 
@@ -262,7 +264,7 @@ function parseStoredSessions(
     if (
       !isRecord(parsed) ||
       (parsed.version !== STORAGE_VERSION &&
-        parsed.version !== LEGACY_STORAGE_VERSION) ||
+        !LEGACY_STORAGE_VERSIONS.has(Number(parsed.version))) ||
       !Array.isArray(parsed.sessions)
     ) {
       return includeMissing ? createDefaultDailySessions(date) : [];
@@ -292,9 +294,11 @@ function parseStoredSessions(
         ),
         distractionReason: nullableString(candidate.distractionReason),
         status: normalizeSessionStatus(candidate.status, fallback.status),
-        tasks: Array.isArray(candidate.tasks)
-          ? candidate.tasks.flatMap((task) => normalizeTask(task))
-          : [],
+        tasks: normalizeTasks(
+          Array.isArray(candidate.tasks) ? candidate.tasks : [],
+          normalizeSessionStatus(candidate.status, fallback.status),
+          nullableString(candidate.finishedAt)
+        ),
       }];
     });
   } catch {
@@ -367,13 +371,20 @@ function normalizeTask(value: unknown): SessionTask[] {
       : null;
   if (status === null) return [];
 
+  const startedAt = nullableString(value.startedAt);
+  const finishedAt = nullableString(value.finishedAt);
+  const workIntervals = Array.isArray(value.workIntervals)
+    ? value.workIntervals.flatMap(normalizeWorkInterval)
+    : migrateLegacyWorkIntervals(status, startedAt, finishedAt);
+
   return [
     {
       id: value.id,
       title: value.title,
       status,
-      startedAt: nullableString(value.startedAt),
-      finishedAt: nullableString(value.finishedAt),
+      startedAt,
+      finishedAt,
+      workIntervals,
       createdAt: value.createdAt,
       updatedAt:
         typeof value.updatedAt === "string"
@@ -383,12 +394,102 @@ function normalizeTask(value: unknown): SessionTask[] {
   ];
 }
 
+function normalizeTasks(
+  values: unknown[],
+  sessionStatus: SessionStatus,
+  sessionFinishedAt: string | null
+): SessionTask[] {
+  const tasks = values.flatMap(normalizeTask);
+  let activeTaskFound = false;
+
+  return tasks.map((task) => {
+    if (task.status !== "running") {
+      return {
+        ...task,
+        workIntervals: task.workIntervals.filter(
+          (interval) => interval.endedAt !== null
+        ),
+      };
+    }
+
+    if (sessionStatus === "running" && !activeTaskFound) {
+      activeTaskFound = true;
+      const closedIntervals = task.workIntervals.filter(
+        (interval) => interval.endedAt !== null
+      );
+      const openInterval = [...task.workIntervals]
+        .reverse()
+        .find((interval) => interval.endedAt === null);
+      return {
+        ...task,
+        workIntervals: openInterval
+          ? [...closedIntervals, openInterval]
+          : closedIntervals,
+        status: openInterval
+          ? "running"
+          : closedIntervals.length
+            ? "paused"
+            : "pending",
+      };
+    }
+
+    const end = validIso(sessionFinishedAt);
+    const closedIntervals = task.workIntervals.flatMap((interval) => {
+      if (interval.endedAt !== null) return [interval];
+      const start = validIso(interval.startedAt);
+      return start !== null && end !== null && end >= start
+        ? [{ ...interval, endedAt: sessionFinishedAt }]
+        : [];
+    });
+    return {
+      ...task,
+      status: closedIntervals.length ? "paused" : "pending",
+      workIntervals: closedIntervals,
+    };
+  });
+}
+
+function normalizeWorkInterval(value: unknown): SessionTaskWorkInterval[] {
+  if (!isRecord(value)) return [];
+  const startedAt = nullableString(value.startedAt);
+  const endedAt = nullableString(value.endedAt);
+  const start = validIso(startedAt);
+  const end = validIso(endedAt);
+  if (startedAt === null || start === null) return [];
+  if (endedAt !== null && (end === null || end < start)) return [];
+
+  return [{ startedAt, endedAt }];
+}
+
+function migrateLegacyWorkIntervals(
+  status: SessionTaskStatus,
+  startedAt: string | null,
+  finishedAt: string | null
+): SessionTaskWorkInterval[] {
+  const start = validIso(startedAt);
+  const finish = validIso(finishedAt);
+  if (start === null) return [];
+
+  if (status === "running") {
+    return [{ startedAt: startedAt as string, endedAt: null }];
+  }
+
+  if (finish === null || finish < start) return [];
+  return [{ startedAt: startedAt as string, endedAt: finishedAt }];
+}
+
+function validIso(value: string | null): Date | null {
+  if (value === null) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
 function normalizeDistraction(
   value: unknown,
   storageVersion: unknown
 ): boolean | null {
   if (value === true) return true;
-  if (storageVersion === STORAGE_VERSION && value === false) return false;
+  if (Number(storageVersion) >= 2 && value === false) return false;
   return null;
 }
 

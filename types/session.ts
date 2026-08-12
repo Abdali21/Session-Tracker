@@ -25,7 +25,18 @@ export const SESSION_STATUS_LABELS = {
   skipped: "Skipped",
 } satisfies Record<SessionStatus, string>;
 
-export type SessionTaskStatus = "pending" | "running" | "completed";
+export type SessionTaskStatus =
+  | "pending"
+  | "running"
+  | "paused"
+  | "completed";
+
+export interface SessionTaskWorkInterval {
+  /** ISO 8601 timestamp for the beginning of this focused work period. */
+  startedAt: string;
+  /** Null only while this task is the session's active task. */
+  endedAt: string | null;
+}
 
 export type StartTimeRule = "respected" | "broken" | "pending";
 
@@ -39,6 +50,8 @@ export interface SessionTask {
   startedAt: string | null;
   /** ISO 8601 string of actual task finish time */
   finishedAt: string | null;
+  /** Focused work periods. This is the source of truth for task duration. */
+  workIntervals: SessionTaskWorkInterval[];
   createdAt: string;
   updatedAt: string;
 }

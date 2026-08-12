@@ -19,6 +19,8 @@ import {
   formatTodayDate,
   getUndoStartConfirmation,
   getSessionTimeValidationError,
+  pauseSessionTask,
+  reopenSessionTask,
   startSessionTask,
   todayDateString,
   undoSessionStart,
@@ -272,6 +274,7 @@ export default function Home() {
       status: "pending",
       startedAt: null,
       finishedAt: null,
+      workIntervals: [],
       createdAt: timestamp,
       updatedAt: timestamp,
     };
@@ -310,10 +313,45 @@ export default function Home() {
     }));
   }
 
+  function pauseTask(sessionType: SessionType, taskId: string) {
+    const now = new Date();
+    let error: string | null = null;
+    updateSession(sessionType, (session) => {
+      const result = pauseSessionTask(session, taskId, now);
+      error = result.error;
+      return result.session;
+    });
+    setTaskErrors((current) => ({
+      ...current,
+      [sessionType]: error ?? undefined,
+    }));
+  }
+
+  function reopenTask(sessionType: SessionType, taskId: string) {
+    updateSession(sessionType, (session) =>
+      reopenSessionTask(session, taskId)
+    );
+    setTaskErrors((current) => ({ ...current, [sessionType]: undefined }));
+  }
+
+  function editTask(sessionType: SessionType, taskId: string, title: string) {
+    const trimmedTitle = title.trim();
+    if (!trimmedTitle) return;
+    const updatedAt = new Date().toISOString();
+    updateSession(sessionType, (session) => ({
+      ...session,
+      tasks: session.tasks.map((task) =>
+        task.id === taskId ? { ...task, title: trimmedTitle, updatedAt } : task
+      ),
+    }));
+  }
+
   function deleteTask(sessionType: SessionType, taskId: string) {
     updateSession(sessionType, (session) => ({
       ...session,
-      tasks: session.tasks.filter((task) => task.id !== taskId),
+      tasks: session.tasks.filter(
+        (task) => task.id !== taskId || task.status === "running"
+      ),
     }));
   }
 
@@ -353,6 +391,15 @@ export default function Home() {
                   }
                   onCompleteTask={(taskId) =>
                     completeTask(selectedSession.sessionType, taskId)
+                  }
+                  onPauseTask={(taskId) =>
+                    pauseTask(selectedSession.sessionType, taskId)
+                  }
+                  onReopenTask={(taskId) =>
+                    reopenTask(selectedSession.sessionType, taskId)
+                  }
+                  onEditTask={(taskId, title) =>
+                    editTask(selectedSession.sessionType, taskId, title)
                   }
                   onDeleteTask={(taskId) =>
                     deleteTask(selectedSession.sessionType, taskId)

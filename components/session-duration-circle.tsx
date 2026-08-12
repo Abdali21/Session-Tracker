@@ -18,7 +18,7 @@ export function SessionDurationCircle({
     duration.minutes === null ? "—" : formatSessionDuration(duration.minutes);
   const label =
     duration.state === "worked"
-        ? "deep work"
+        ? "session"
         : duration.state === "invalid"
           ? "invalid"
           : "duration";

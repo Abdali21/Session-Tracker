@@ -27,12 +27,17 @@ export function useSessionTiming(
       setNow(timestamp);
     }
 
+    function tick() {
+      setNow(new Date());
+    }
+
     function handleVisibilityChange() {
       if (document.visibilityState === "visible") synchronize();
     }
 
     synchronize();
-    const intervalId = window.setInterval(synchronize, 30_000);
+    // Live task timers derive from timestamps; localStorage is not written here.
+    const intervalId = window.setInterval(tick, 1_000);
     window.addEventListener("focus", synchronize);
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
