@@ -1,9 +1,9 @@
 "use client";
 
 import { useMemo, useState, useSyncExternalStore } from "react";
-import { Calendar } from "lucide-react";
+import { CircleAlert } from "lucide-react";
+import Link from "next/link";
 import { AppShell } from "@/components/app-shell";
-import { PageHeader } from "@/components/page-header";
 import { SessionCard } from "@/components/session-card";
 import { SessionTabs } from "@/components/session-tabs";
 import {
@@ -16,7 +16,8 @@ import {
   correctActualSessionTime,
   editCompletedSession,
   finalizeRunningTaskAtSessionEnd,
-  formatTodayDate,
+  getCurrentScheduledSessionType,
+  getNextScheduledSessionStart,
   getUndoStartConfirmation,
   getSessionTimeValidationError,
   pauseSessionTask,
@@ -26,26 +27,27 @@ import {
   undoSessionStart,
   reopenCompletedSession,
 } from "@/lib/session";
-import type { Session, SessionTask, SessionType } from "@/types/session";
-import { useAccountabilityReconciliation } from "@/lib/use-accountability-reconciliation";
+import type {
+  Session,
+  SessionTask,
+  SessionType,
+} from "@/types/session";
+import type { TaskDetails } from "@/components/task-form";
 import { useSessionTiming } from "@/lib/use-session-timing";
-
-const subscribeToNothing = () => () => {};
+import { usePendingAccountabilityCount } from "@/lib/use-pending-accountability-count";
 
 export default function Home() {
-  const [selectedSessionType, setSelectedSessionType] =
-    useState<SessionType>("skill_mastery");
+  const [manualSelection, setManualSelection] = useState<{
+    date: string;
+    sessionType: SessionType;
+    autoSwitchAt: number | null;
+  } | null>(null);
   const [sessionErrors, setSessionErrors] = useState<
     Partial<Record<SessionType, string>>
   >({});
   const [taskErrors, setTaskErrors] = useState<
     Partial<Record<SessionType, string>>
   >({});
-  const isClient = useSyncExternalStore(
-    subscribeToNothing,
-    () => true,
-    () => false
-  );
   const date = todayDateString();
   const store = useMemo(() => createDailySessionStore(date), [date]);
   const accountabilityStore = useMemo(
@@ -57,14 +59,33 @@ export default function Home() {
     store.getSnapshot,
     store.getServerSnapshot
   );
+  const pendingAccountabilityCount = usePendingAccountabilityCount();
   const timingNow = useSessionTiming(store, sessions);
-  useAccountabilityReconciliation(accountabilityStore, sessions);
-  const currentDate = isClient ? formatTodayDate() : "";
+  const currentScheduledSessionType = timingNow
+    ? getCurrentScheduledSessionType(sessions, timingNow)
+    : null;
+  const manualSelectionIsActive =
+    timingNow !== null &&
+    manualSelection?.date === date &&
+    (manualSelection.autoSwitchAt === null ||
+      timingNow.getTime() < manualSelection.autoSwitchAt);
+  const selectedSessionType = manualSelectionIsActive
+    ? manualSelection.sessionType
+    : currentScheduledSessionType;
   const selectedSession =
     sessions.find(
       (session) => session.sessionType === selectedSessionType
-    ) ?? sessions[0];
+    ) ?? null;
 
+  function selectSession(sessionType: SessionType) {
+    const timestamp = timingNow ?? new Date();
+    setManualSelection({
+      date,
+      sessionType,
+      autoSwitchAt:
+        getNextScheduledSessionStart(sessions, timestamp)?.getTime() ?? null,
+    });
+  }
   function updateSession(
     sessionType: SessionType,
     updater: (session: Session) => Session
@@ -228,7 +249,7 @@ export default function Home() {
         .getSnapshot()
         .violations.find(({ id }) => id === violationId);
       if (
-        violation?.pageCompleted &&
+        violation?.status === "completed" &&
         !window.confirm(
           "The handwritten page is already completed. Remove this completed accountability record?"
         )
@@ -263,14 +284,18 @@ export default function Home() {
     }));
   }
 
-  function addTask(sessionType: SessionType, title: string) {
-    const trimmedTitle = title.trim();
-    if (!trimmedTitle) return;
+  function addTask(sessionType: SessionType, details: TaskDetails) {
+    const trimmedOutcome = details.outcome.trim();
+    if (!trimmedOutcome) return;
 
     const timestamp = new Date().toISOString();
     const task: SessionTask = {
       id: crypto.randomUUID(),
-      title: trimmedTitle,
+      title: trimmedOutcome,
+      outcome: trimmedOutcome,
+      firstAction: details.firstAction,
+      category: details.category,
+      expectedDurationMinutes: details.expectedDurationMinutes,
       status: "pending",
       startedAt: null,
       finishedAt: null,
@@ -334,14 +359,27 @@ export default function Home() {
     setTaskErrors((current) => ({ ...current, [sessionType]: undefined }));
   }
 
-  function editTask(sessionType: SessionType, taskId: string, title: string) {
-    const trimmedTitle = title.trim();
-    if (!trimmedTitle) return;
+  function editTask(
+    sessionType: SessionType,
+    taskId: string,
+    details: TaskDetails
+  ) {
+    const trimmedOutcome = details.outcome.trim();
+    if (!trimmedOutcome) return;
     const updatedAt = new Date().toISOString();
     updateSession(sessionType, (session) => ({
       ...session,
       tasks: session.tasks.map((task) =>
-        task.id === taskId ? { ...task, title: trimmedTitle, updatedAt } : task
+        task.id === taskId
+          ? {
+              ...task,
+              outcome: trimmedOutcome,
+              firstAction: details.firstAction,
+              category: details.category,
+              expectedDurationMinutes: details.expectedDurationMinutes,
+              updatedAt,
+            }
+          : task
       ),
     }));
   }
@@ -356,19 +394,23 @@ export default function Home() {
   }
 
   return (
-    <AppShell activePage="today">
-      <div className="space-y-8">
-        <PageHeader
-          title="Today's Sessions"
-          eyebrow={currentDate}
-          icon={Calendar}
-        />
+    <AppShell activePage="today" compact fullWidth>
+      <div className="space-y-5">
+        {pendingAccountabilityCount > 0 ? (
+          <Link
+            href="/accountability"
+            className="flex w-fit items-center gap-2 rounded-lg border border-[#FECDCA] bg-[#FFF6F5] px-3 py-2 text-[12px] font-bold text-[#B42318] transition-colors hover:bg-[#FEECE9] focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-[#D92D20]/15"
+          >
+            <CircleAlert className="size-4" aria-hidden="true" />
+            Accountability required · {pendingAccountabilityCount} pending
+          </Link>
+        ) : null}
 
-        <div className="mx-auto w-full max-w-[940px] space-y-5">
+        <div className="w-full space-y-5">
           <SessionTabs
             sessions={sessions}
             selectedSessionType={selectedSessionType}
-            onSelect={setSelectedSessionType}
+            onSelect={selectSession}
           />
 
           {selectedSession ? (
@@ -376,76 +418,73 @@ export default function Home() {
               id="selected-session-panel"
               role="tabpanel"
               aria-labelledby={`session-tab-${selectedSession.sessionType}`}
+              className="min-w-0"
             >
-                <SessionCard
-                  key={selectedSession.id}
-                  session={selectedSession}
-                  timestamp={timingNow ?? undefined}
-                  onStart={() => startSession(selectedSession.sessionType)}
-                  onFinish={() => finishSession(selectedSession.sessionType)}
-                  onAddTask={(title) =>
-                    addTask(selectedSession.sessionType, title)
-                  }
-                  onStartTask={(taskId) =>
-                    startTask(selectedSession.sessionType, taskId)
-                  }
-                  onCompleteTask={(taskId) =>
-                    completeTask(selectedSession.sessionType, taskId)
-                  }
-                  onPauseTask={(taskId) =>
-                    pauseTask(selectedSession.sessionType, taskId)
-                  }
-                  onReopenTask={(taskId) =>
-                    reopenTask(selectedSession.sessionType, taskId)
-                  }
-                  onEditTask={(taskId, title) =>
-                    editTask(selectedSession.sessionType, taskId, title)
-                  }
-                  onDeleteTask={(taskId) =>
-                    deleteTask(selectedSession.sessionType, taskId)
-                  }
-                  onActualStartChange={(clockTime) =>
-                    correctSessionTime(
-                      selectedSession.sessionType,
-                      "start",
-                      clockTime
-                    )
-                  }
-                  onActualFinishChange={(clockTime) =>
-                    correctSessionTime(
-                      selectedSession.sessionType,
-                      "finish",
-                      clockTime
-                    )
-                  }
-                  onEditSession={(startTime, finishTime) =>
-                    editSession(
-                      selectedSession.sessionType,
-                      startTime,
-                      finishTime
-                    )
-                  }
-                  onReopen={() =>
-                    reopenSession(selectedSession.sessionType)
-                  }
-                  onUndoStart={() =>
-                    undoStart(selectedSession.sessionType)
-                  }
-                  onDistractedChange={(distracted) =>
-                    setSessionDistracted(
-                      selectedSession.sessionType,
-                      distracted
-                    )
-                  }
-                  onDistractionReasonChange={(reason) =>
-                    setDistractionReason(
-                      selectedSession.sessionType,
-                      reason
-                    )
-                  }
-                  actionError={sessionErrors[selectedSession.sessionType]}
-                  taskError={taskErrors[selectedSession.sessionType]}
-                />
+              <SessionCard
+                key={selectedSession.id}
+                session={selectedSession}
+                timestamp={timingNow ?? undefined}
+                onStart={() => startSession(selectedSession.sessionType)}
+                onFinish={() => finishSession(selectedSession.sessionType)}
+                onAddTask={(details) =>
+                  addTask(selectedSession.sessionType, details)
+                }
+                onStartTask={(taskId) =>
+                  startTask(selectedSession.sessionType, taskId)
+                }
+                onCompleteTask={(taskId) =>
+                  completeTask(selectedSession.sessionType, taskId)
+                }
+                onPauseTask={(taskId) =>
+                  pauseTask(selectedSession.sessionType, taskId)
+                }
+                onReopenTask={(taskId) =>
+                  reopenTask(selectedSession.sessionType, taskId)
+                }
+                onEditTask={(taskId, details) =>
+                  editTask(selectedSession.sessionType, taskId, details)
+                }
+                onDeleteTask={(taskId) =>
+                  deleteTask(selectedSession.sessionType, taskId)
+                }
+                onActualStartChange={(clockTime) =>
+                  correctSessionTime(
+                    selectedSession.sessionType,
+                    "start",
+                    clockTime
+                  )
+                }
+                onActualFinishChange={(clockTime) =>
+                  correctSessionTime(
+                    selectedSession.sessionType,
+                    "finish",
+                    clockTime
+                  )
+                }
+                onEditSession={(startTime, finishTime) =>
+                  editSession(
+                    selectedSession.sessionType,
+                    startTime,
+                    finishTime
+                  )
+                }
+                onReopen={() => reopenSession(selectedSession.sessionType)}
+                onUndoStart={() => undoStart(selectedSession.sessionType)}
+                onDistractedChange={(distracted) =>
+                  setSessionDistracted(
+                    selectedSession.sessionType,
+                    distracted
+                  )
+                }
+                onDistractionReasonChange={(reason) =>
+                  setDistractionReason(
+                    selectedSession.sessionType,
+                    reason
+                  )
+                }
+                actionError={sessionErrors[selectedSession.sessionType]}
+                taskError={taskErrors[selectedSession.sessionType]}
+              />
             </div>
           ) : null}
         </div>

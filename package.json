@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "node tests/session-timing.test.cjs && node tests/report-goal.test.cjs && node tests/accountability.test.cjs && node tests/analytics.test.cjs && node tests/projects.test.cjs && node tests/today-goal.test.cjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

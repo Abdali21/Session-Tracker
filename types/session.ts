@@ -31,6 +31,43 @@ export type SessionTaskStatus =
   | "paused"
   | "completed";
 
+export const TASK_CATEGORIES = [
+  "creative_mastery",
+  "client_execution",
+  "client_acquisition",
+] as const;
+
+export type SelectableTaskCategory = (typeof TASK_CATEGORIES)[number];
+
+/** Stored values retained so older task records remain readable. */
+export const LEGACY_TASK_CATEGORIES = [
+  "business_operations",
+  "low_value_misc",
+] as const;
+
+export type LegacyTaskCategory = (typeof LEGACY_TASK_CATEGORIES)[number];
+export type TaskCategory = SelectableTaskCategory | LegacyTaskCategory;
+
+export const TASK_CATEGORY_LABELS = {
+  creative_mastery: "Creative Mastery",
+  client_execution: "Client Execution",
+  client_acquisition: "Client Acquisition",
+} satisfies Record<SelectableTaskCategory, string>;
+
+export function isSelectableTaskCategory(
+  value: TaskCategory | string
+): value is SelectableTaskCategory {
+  return TASK_CATEGORIES.includes(value as SelectableTaskCategory);
+}
+
+export function getTaskCategoryLabel(category: TaskCategory): string {
+  return isSelectableTaskCategory(category)
+    ? TASK_CATEGORY_LABELS[category]
+    : "Uncategorized";
+}
+
+export const DEFAULT_TASK_CATEGORY: SelectableTaskCategory = "creative_mastery";
+
 export interface SessionTaskWorkInterval {
   /** ISO 8601 timestamp for the beginning of this focused work period. */
   startedAt: string;
@@ -45,6 +82,14 @@ export type DistractionRule = "respected" | "broken" | "pending";
 export interface SessionTask {
   id: string;
   title: string;
+  /** The result this task is intended to produce. Null for legacy tasks. */
+  outcome: string | null;
+  /** The immediate action to take after starting. Null when not specified. */
+  firstAction: string | null;
+  /** Workstream used for time-allocation analytics. */
+  category: TaskCategory;
+  /** Planned task duration in whole minutes. Null when it was not estimated. */
+  expectedDurationMinutes: number | null;
   status: SessionTaskStatus;
   /** ISO 8601 string of actual task start time */
   startedAt: string | null;
@@ -54,6 +99,13 @@ export interface SessionTask {
   workIntervals: SessionTaskWorkInterval[];
   createdAt: string;
   updatedAt: string;
+}
+
+/** Outcome is the user-facing task name; title remains as a legacy fallback. */
+export function getTaskDisplayName(
+  task: Pick<SessionTask, "outcome" | "title">
+): string {
+  return task.outcome?.trim() || task.title;
 }
 
 export interface Session {
@@ -76,17 +128,17 @@ export interface Session {
 
 export const SESSION_SCHEDULE = {
   skill_mastery: {
-    label: "Skill Mastery",
+    label: "Session 1",
     plannedStart: "09:00",
     plannedFinish: "13:00",
   },
   client_acquisition: {
-    label: "Client Acquisition",
+    label: "Session 2",
     plannedStart: "14:00",
     plannedFinish: "17:00",
   },
   execution: {
-    label: "Execution",
+    label: "Session 3",
     plannedStart: "18:00",
     plannedFinish: "21:00",
   },

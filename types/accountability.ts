@@ -11,19 +11,23 @@ export type AccountabilityViolationType =
 
 export const ACCOUNTABILITY_VIOLATION_LABELS = {
   started_late: "Started Late",
-  distracted: "Got Distracted",
+  distracted: "Distracted",
   missed_session: "Missed Session",
 } satisfies Record<AccountabilityViolationType, string>;
+
+export type AccountabilityStatus = "pending" | "completed";
 
 export interface AccountabilityViolation {
   id: string;
   date: string;
+  sessionId: string;
   sessionType: SessionType;
   type: AccountabilityViolationType;
   details: string;
   pageInstruction: string;
-  pageCompleted: boolean;
+  status: AccountabilityStatus;
   createdAt: string;
+  completedAt: string | null;
 }
 
 export interface AccountabilityDay {

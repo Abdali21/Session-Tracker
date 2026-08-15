@@ -1,7 +1,6 @@
 import {
   calculateLateMinutes,
   formatTime,
-  getSessionLabel,
   todayDateString,
 } from "@/lib/session";
 import {
@@ -19,8 +18,8 @@ import {
 
 const ACCOUNTABILITY_STORAGE_KEY_PREFIX =
   "work-session-tracker:accountability:";
-const ACCOUNTABILITY_STORAGE_VERSION = 3;
-const LEGACY_ACCOUNTABILITY_STORAGE_VERSIONS = new Set([1, 2]);
+const ACCOUNTABILITY_STORAGE_VERSION = 4;
+const LEGACY_ACCOUNTABILITY_STORAGE_VERSIONS = new Set([1, 2, 3]);
 const ACCOUNTABILITY_CHANGED_EVENT =
   "work-session-tracker:accountability-changed";
 const VIOLATION_TYPE_SET = new Set<AccountabilityViolationType>(
@@ -42,12 +41,18 @@ export interface AccountabilityStore {
   reconcile: (sessions: Session[], now?: Date) => void;
   recordDistraction: (session: Session, now?: Date) => void;
   removeDistraction: (sessionType: SessionType) => void;
-  setPageCompleted: (violationId: string, completed: boolean) => void;
+  markCompleted: (violationId: string, now?: Date) => void;
 }
 
 export interface AccountabilityHistoryStore {
   getSnapshot: () => AccountabilityDay[];
   getServerSnapshot: () => AccountabilityDay[];
+  subscribe: (listener: () => void) => () => void;
+}
+
+export interface AccountabilityOverviewStore {
+  getSnapshot: () => number;
+  getServerSnapshot: () => number;
   subscribe: (listener: () => void) => () => void;
 }
 
@@ -109,7 +114,7 @@ export function createAccountabilityStore(date: string): AccountabilityStore {
       };
     },
     activate(now = new Date()) {
-      if (date !== todayDateString(now)) return;
+      if (date > todayDateString(now)) return;
 
       const day = getSnapshot();
       if (day.activatedAt !== null) return;
@@ -120,7 +125,7 @@ export function createAccountabilityStore(date: string): AccountabilityStore {
       });
     },
     reconcile(sessions, now = new Date()) {
-      if (date !== todayDateString(now)) return;
+      if (date > todayDateString(now)) return;
 
       const day = getSnapshot();
       if (day.activatedAt === null) return;
@@ -170,8 +175,8 @@ export function createAccountabilityStore(date: string): AccountabilityStore {
 
       writeLocalDay({ ...day, violations });
     },
-    setPageCompleted(violationId, completed) {
-      updateViolationCompletion(date, violationId, completed);
+    markCompleted(violationId, now = new Date()) {
+      markViolationCompleted(date, violationId, now);
     },
   };
 }
@@ -250,6 +255,69 @@ export function createAccountabilityHistoryStore(
   };
 }
 
+export function createAccountabilityOverviewStore(): AccountabilityOverviewStore {
+  const listeners = new Set<() => void>();
+  let cachedSignature: string | undefined;
+  let cachedPendingCount = 0;
+
+  function getSnapshot(): number {
+    const entries = getStoredAccountabilityEntries();
+    const signature = entries
+      .map(({ date, raw }) => `${date}\u0000${raw}`)
+      .join("\u0001");
+    if (signature === cachedSignature) return cachedPendingCount;
+
+    cachedSignature = signature;
+    cachedPendingCount = entries.reduce(
+      (total, { date, raw }) =>
+        total +
+        parseAccountabilityDay(raw, date).violations.filter(
+          ({ status }) => status === "pending"
+        ).length,
+      0
+    );
+    return cachedPendingCount;
+  }
+
+  function notifyListeners() {
+    cachedSignature = undefined;
+    listeners.forEach((listener) => listener());
+  }
+
+  return {
+    getSnapshot,
+    getServerSnapshot: () => 0,
+    subscribe(listener) {
+      listeners.add(listener);
+      const handleStorage = (event: StorageEvent) => {
+        if (
+          event.key === null ||
+          event.key.startsWith(ACCOUNTABILITY_STORAGE_KEY_PREFIX)
+        ) {
+          notifyListeners();
+        }
+      };
+      const handleAccountabilityChanged = () => notifyListeners();
+      window.addEventListener("storage", handleStorage);
+      window.addEventListener(
+        ACCOUNTABILITY_CHANGED_EVENT,
+        handleAccountabilityChanged
+      );
+
+      return () => {
+        listeners.delete(listener);
+        if (listeners.size === 0) {
+          window.removeEventListener("storage", handleStorage);
+          window.removeEventListener(
+            ACCOUNTABILITY_CHANGED_EVENT,
+            handleAccountabilityChanged
+          );
+        }
+      };
+    },
+  };
+}
+
 export function getAccountabilityViolationId(
   date: string,
   sessionType: SessionType,
@@ -258,12 +326,12 @@ export function getAccountabilityViolationId(
   return `${date}:${sessionType}:${type}`;
 }
 
-export function setAccountabilityPageCompleted(
+export function markAccountabilityCompleted(
   date: string,
   violationId: string,
-  completed: boolean
+  now = new Date()
 ) {
-  updateViolationCompletion(date, violationId, completed);
+  markViolationCompleted(date, violationId, now);
 }
 
 function reconcileCurrentViolations(
@@ -305,7 +373,11 @@ function reconcileCurrentViolations(
     }
   });
 
-  return sortViolations(violations);
+  const detectedIds = new Set(violations.map(({ id }) => id));
+  const completedHistory = day.violations.filter(
+    ({ id, status }) => status === "completed" && !detectedIds.has(id)
+  );
+  return sortViolations([...violations, ...completedHistory]);
 }
 
 function createLateStartViolation(
@@ -324,9 +396,6 @@ function createLateStartViolation(
       `Actual Start: ${formatTime(session.startedAt)}`,
       `Late By: ${difference}`,
     ].join("\n"),
-    `I started my ${getSessionLabel(
-      session.sessionType
-    )} session ${formatMinutesForSentence(lateByMinutes)} late.`,
     now
   );
 }
@@ -340,8 +409,9 @@ function createDistractionViolation(
   return createViolation(
     session,
     "distracted",
-    reason ? `Reason:\n${reason}` : "",
-    `I got distracted during my ${getSessionLabel(session.sessionType)} session.`,
+    reason
+      ? `Distracted during session\nReason: ${reason}`
+      : "Distracted during session",
     now
   );
 }
@@ -354,7 +424,6 @@ function createMissedSessionViolation(
     session,
     "missed_session",
     "Session status: Missed",
-    `I missed my ${getSessionLabel(session.sessionType)} session today.`,
     now
   );
 }
@@ -367,8 +436,9 @@ function preserveViolationState(
   return existing
     ? {
         ...violation,
-        pageCompleted: existing.pageCompleted,
+        status: existing.status,
         createdAt: existing.createdAt,
+        completedAt: existing.completedAt,
       }
     : violation;
 }
@@ -377,38 +447,40 @@ function createViolation(
   session: Session,
   type: AccountabilityViolationType,
   details: string,
-  pageInstruction: string,
   now: Date
 ): AccountabilityViolation {
   return {
     id: getAccountabilityViolationId(session.date, session.sessionType, type),
     date: session.date,
+    sessionId: session.id,
     sessionType: session.sessionType,
     type,
     details,
-    pageInstruction,
-    pageCompleted: false,
+    pageInstruction: "Write one full page about this violation.",
+    status: "pending",
     createdAt: now.toISOString(),
+    completedAt: null,
   };
 }
 
-function updateViolationCompletion(
+function markViolationCompleted(
   date: string,
   violationId: string,
-  completed: boolean
+  now: Date
 ) {
   const day = readAccountabilityDay(date);
   let changed = false;
   const violations = day.violations.map((violation) => {
-    if (
-      violation.id !== violationId ||
-      violation.pageCompleted === completed
-    ) {
+    if (violation.id !== violationId || violation.status === "completed") {
       return violation;
     }
 
     changed = true;
-    return { ...violation, pageCompleted: completed };
+    return {
+      ...violation,
+      status: "completed" as const,
+      completedAt: now.toISOString(),
+    };
   });
   if (changed) writeAccountabilityDay({ ...day, violations });
 }
@@ -485,7 +557,6 @@ function normalizeViolation(
     typeof value.type !== "string" ||
     typeof value.details !== "string" ||
     typeof value.pageInstruction !== "string" ||
-    typeof value.pageCompleted !== "boolean" ||
     typeof value.createdAt !== "string"
   ) {
     return [];
@@ -494,6 +565,15 @@ function normalizeViolation(
   const sessionType = value.sessionType as SessionType;
   const type = normalizeViolationType(value.type);
   if (type === null) return [];
+  const status =
+    value.status === "pending" || value.status === "completed"
+      ? value.status
+      : typeof value.pageCompleted === "boolean"
+        ? value.pageCompleted
+          ? "completed"
+          : "pending"
+        : null;
+  if (status === null) return [];
 
   const legacyId = `${date}:${sessionType}:${value.type}`;
   if (
@@ -506,12 +586,22 @@ function normalizeViolation(
   return [{
     id: getAccountabilityViolationId(date, sessionType, type),
     date,
+    sessionId:
+      typeof value.sessionId === "string"
+        ? value.sessionId
+        : `${date}:${sessionType}`,
     sessionType,
     type,
     details: value.details,
-    pageInstruction: value.pageInstruction,
-    pageCompleted: value.pageCompleted,
+    pageInstruction: "Write one full page about this violation.",
+    status,
     createdAt: value.createdAt,
+    completedAt:
+      status === "completed"
+        ? typeof value.completedAt === "string"
+          ? value.completedAt
+          : value.createdAt
+        : null,
   }];
 }
 
@@ -554,11 +644,15 @@ function deduplicateViolations(
 
     unique.set(violation.id, {
       ...violation,
-      pageCompleted: existing.pageCompleted || violation.pageCompleted,
+      status:
+        existing.status === "completed" || violation.status === "completed"
+          ? "completed"
+          : "pending",
       createdAt:
         existing.createdAt < violation.createdAt
           ? existing.createdAt
           : violation.createdAt,
+      completedAt: existing.completedAt ?? violation.completedAt,
     });
   });
 
@@ -574,11 +668,6 @@ function formatDifference(totalMinutes: number): string {
   return remainingMinutes === 0
     ? `${hours}h`
     : `${hours}h ${remainingMinutes}m`;
-}
-
-function formatMinutesForSentence(totalMinutes: number): string {
-  const minutes = Math.max(0, Math.round(totalMinutes));
-  return `${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
 }
 
 function formatClockTime(time: string): string {
@@ -601,6 +690,22 @@ function emptyDay(date: string): AccountabilityDay {
 
 function accountabilityKey(date: string): string {
   return `${ACCOUNTABILITY_STORAGE_KEY_PREFIX}${date}`;
+}
+
+function getStoredAccountabilityEntries(): Array<{
+  date: string;
+  raw: string;
+}> {
+  const entries: Array<{ date: string; raw: string }> = [];
+  for (let index = 0; index < window.localStorage.length; index += 1) {
+    const key = window.localStorage.key(index);
+    if (!key?.startsWith(ACCOUNTABILITY_STORAGE_KEY_PREFIX)) continue;
+
+    const date = key.slice(ACCOUNTABILITY_STORAGE_KEY_PREFIX.length);
+    const raw = window.localStorage.getItem(key);
+    if (isCalendarDate(date) && raw !== null) entries.push({ date, raw });
+  }
+  return entries.sort((left, right) => right.date.localeCompare(left.date));
 }
 
 function isCalendarDate(value: string): boolean {

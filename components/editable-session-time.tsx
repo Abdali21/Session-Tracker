@@ -49,7 +49,7 @@ export function EditableSessionTime({
 
   return (
     <div>
-      <span className="mb-1.5 block text-[13px] font-semibold text-text-muted">
+      <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-[0.08em] text-text-muted">
         {label}
       </span>
       {isEditing ? (

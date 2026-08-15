@@ -33,6 +33,8 @@ export interface SessionTaskMutationResult {
   error: string | null;
 }
 
+export type TaskClarityIssue = "outcome" | "estimated_time";
+
 export type ActualSessionTimeField = "start" | "finish";
 
 export interface SessionTimeCorrectionResult {
@@ -135,6 +137,41 @@ export function getScheduledSessionEnd(session: Session): Date | null {
   );
 }
 
+/** Returns the session whose dated schedule contains the timestamp. */
+export function getCurrentScheduledSessionType(
+  sessions: Session[],
+  timestamp = new Date()
+): SessionType | null {
+  if (Number.isNaN(timestamp.getTime())) return null;
+
+  const current = sessions.find((session) => {
+    const scheduledStart = getScheduledSessionStart(session);
+    const scheduledEnd = getScheduledSessionEnd(session);
+    return (
+      scheduledStart !== null &&
+      scheduledEnd !== null &&
+      timestamp >= scheduledStart &&
+      timestamp < scheduledEnd
+    );
+  });
+
+  return current?.sessionType ?? null;
+}
+
+/** Returns the next dated session start strictly after the timestamp. */
+export function getNextScheduledSessionStart(
+  sessions: Session[],
+  timestamp = new Date()
+): Date | null {
+  if (Number.isNaN(timestamp.getTime())) return null;
+
+  return sessions.reduce<Date | null>((nearest, session) => {
+    const scheduledStart = getScheduledSessionStart(session);
+    if (scheduledStart === null || scheduledStart <= timestamp) return nearest;
+    return nearest === null || scheduledStart < nearest ? scheduledStart : nearest;
+  }, null);
+}
+
 /** Returns whether a valid running session has reached its automatic cutoff. */
 export function shouldAutoCompleteSession(
   session: Session,
@@ -162,7 +199,9 @@ export function resolveExpiredSession(
   if (scheduledEnd === null) return session;
 
   if (session.status === "completed") {
-    const effectiveEnd = getEffectiveSessionEnd(session, timestamp);
+    const effectiveEnd =
+      getEffectiveSessionEnd(session, timestamp) ??
+      (timestamp >= scheduledEnd ? scheduledEnd : null);
     return effectiveEnd === null
       ? session
       : finalizeRunningTaskAtSessionEnd(session, effectiveEnd);
@@ -356,6 +395,47 @@ export function calculateTaskDuration(
   );
 }
 
+/**
+ * Returns per-task tracked seconds while assigning any malformed overlapping
+ * intervals to only one task. Normal task switching never creates overlaps,
+ * but this keeps imported or edited history from inflating analytics.
+ */
+export function getSessionTaskDurationBreakdown(
+  session: Session,
+  timestamp = new Date()
+): Array<{ task: SessionTask; seconds: number }> {
+  const intervals = session.tasks.flatMap((task, taskIndex) =>
+    getValidTaskIntervals(task, session, timestamp).map((interval) => ({
+      ...interval,
+      taskIndex,
+    }))
+  );
+  const boundaries = [...new Set(intervals.flatMap(({ start, end }) => [start, end]))]
+    .sort((left, right) => left - right);
+  const millisecondsByTask = new Map<number, number>();
+
+  for (let index = 0; index < boundaries.length - 1; index += 1) {
+    const start = boundaries[index];
+    const end = boundaries[index + 1];
+    if (end <= start) continue;
+
+    const owner = intervals
+      .filter((interval) => interval.start <= start && interval.end >= end)
+      .sort((left, right) => left.taskIndex - right.taskIndex)[0];
+    if (!owner) continue;
+
+    millisecondsByTask.set(
+      owner.taskIndex,
+      (millisecondsByTask.get(owner.taskIndex) ?? 0) + end - start
+    );
+  }
+
+  return session.tasks.map((task, taskIndex) => ({
+    task,
+    seconds: Math.floor((millisecondsByTask.get(taskIndex) ?? 0) / 1_000),
+  }));
+}
+
 export function getTrackedTaskTime(
   session: Session,
   timestamp = new Date()
@@ -368,6 +448,11 @@ export function finalizeRunningTaskAtSessionEnd(
   effectiveEnd: Date
 ): Session {
   const sessionStart = getValidSessionStart(session);
+  const scheduledEnd = getScheduledSessionEnd(session);
+  const completionTime =
+    scheduledEnd !== null && effectiveEnd > scheduledEnd
+      ? scheduledEnd
+      : effectiveEnd;
   let changed = false;
   const tasks = session.tasks.map((task) => {
     if (task.status !== "running") return task;
@@ -379,25 +464,25 @@ export function finalizeRunningTaskAtSessionEnd(
       sessionStart === null ||
       taskStart === null ||
       taskStart < sessionStart ||
-      taskStart > effectiveEnd
+      taskStart > completionTime
     ) {
       return {
         ...task,
-        status: getStoredIntervals(task).some((interval) => interval.endedAt !== null)
-          ? ("paused" as const)
-          : ("pending" as const),
+        status: "completed" as const,
+        finishedAt: completionTime.toISOString(),
         workIntervals: getStoredIntervals(task).filter(
           (interval) => interval.endedAt !== null
         ),
-        updatedAt: effectiveEnd.toISOString(),
+        updatedAt: completionTime.toISOString(),
       };
     }
 
     return {
       ...task,
-      status: "paused" as const,
-      workIntervals: closeOpenTaskInterval(task, effectiveEnd),
-      updatedAt: effectiveEnd.toISOString(),
+      status: "completed" as const,
+      finishedAt: completionTime.toISOString(),
+      workIntervals: closeOpenTaskInterval(task, completionTime),
+      updatedAt: completionTime.toISOString(),
     };
   });
 
@@ -422,6 +507,19 @@ export function startSessionTask(
   const task = session.tasks.find((candidate) => candidate.id === taskId);
   if (!task || task.status === "completed" || task.status === "running") {
     return { session, error: null };
+  }
+
+  const clarityIssues = getTaskClarityIssues(task);
+  if (task.startedAt === null && clarityIssues.length > 0) {
+    return {
+      session,
+      error:
+        clarityIssues.length === 2
+          ? "Add an outcome and estimated time before starting this task."
+          : clarityIssues[0] === "outcome"
+            ? "Add an outcome before starting this task."
+            : "Add an estimated time before starting this task.",
+    };
   }
 
   const sessionStart = getValidSessionStart(session);
@@ -469,6 +567,22 @@ export function startSessionTask(
     },
     error: null,
   };
+}
+
+/** Returns the essential planning fields missing from a task brief. */
+export function getTaskClarityIssues(task: SessionTask): TaskClarityIssue[] {
+  const issues: TaskClarityIssue[] = [];
+  if (typeof task.outcome !== "string" || !task.outcome.trim()) {
+    issues.push("outcome");
+  }
+  if (
+    typeof task.expectedDurationMinutes !== "number" ||
+    !Number.isFinite(task.expectedDurationMinutes) ||
+    task.expectedDurationMinutes <= 0
+  ) {
+    issues.push("estimated_time");
+  }
+  return issues;
 }
 
 export function pauseSessionTask(
@@ -1006,14 +1120,18 @@ function stopTasksForMissedSession(
   const nextTasks = tasks.map((task) => {
     if (task.status !== "running") return task;
     changed = true;
+    const openInterval = getOpenInterval(task);
+    const openStart = dateFromIso(openInterval?.startedAt ?? null);
     return {
       ...task,
-      status: getStoredIntervals(task).some((interval) => interval.endedAt !== null)
-        ? ("paused" as const)
-        : ("pending" as const),
-      workIntervals: getStoredIntervals(task).filter(
-        (interval) => interval.endedAt !== null
-      ),
+      status: "completed" as const,
+      finishedAt: timestamp.toISOString(),
+      workIntervals:
+        openStart !== null && openStart <= timestamp
+          ? closeOpenTaskInterval(task, timestamp)
+          : getStoredIntervals(task).filter(
+              (interval) => interval.endedAt !== null
+            ),
       updatedAt: timestamp.toISOString(),
     };
   });

@@ -1,19 +1,13 @@
-import { BookOpen, Users, Zap, type LucideIcon } from "lucide-react";
+import { Clock3 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { getSessionLabel } from "@/lib/session";
 import type { Session, SessionType } from "@/types/session";
 
 interface SessionTabsProps {
   sessions: Session[];
-  selectedSessionType: SessionType;
+  selectedSessionType: SessionType | null;
   onSelect: (sessionType: SessionType) => void;
 }
-
-const SESSION_ICONS: Record<SessionType, LucideIcon> = {
-  skill_mastery: BookOpen,
-  client_acquisition: Users,
-  execution: Zap,
-};
 
 export function SessionTabs({
   sessions,
@@ -27,7 +21,6 @@ export function SessionTabs({
       aria-label="Daily sessions"
     >
       {sessions.map((session) => {
-        const Icon = SESSION_ICONS[session.sessionType];
         const isSelected = session.sessionType === selectedSessionType;
 
         return (
@@ -46,7 +39,7 @@ export function SessionTabs({
                 : "border-[#DDE1E9] bg-white text-[#343A4C] hover:border-[#AAA7CE] hover:bg-[#FBFBFD]"
             )}
           >
-            <Icon
+            <Clock3
               className={cn(
                 "size-[17px]",
                 isSelected ? "text-white" : "text-[#777E91]"

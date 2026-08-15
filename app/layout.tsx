@@ -11,7 +11,7 @@ const geistSans = Geist({
 export const metadata: Metadata = {
   title: "Work Session Tracker",
   description:
-    "Track your three daily work sessions: Skill Mastery, Client Acquisition, and Execution.",
+    "Set a daily outcome, execute focused work sessions, and track standalone project deadlines.",
 };
 
 export default function RootLayout({

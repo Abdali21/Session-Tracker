@@ -39,6 +39,7 @@ Module._extensions[".ts"] = function transpileTypeScript(module, filename) {
 };
 
 const storage = new Map();
+const windowListeners = new Map();
 global.CustomEvent = class CustomEvent {
   constructor(type, options) {
     this.type = type;
@@ -54,13 +55,22 @@ global.window = {
       return storage.size;
     },
   },
-  addEventListener() {},
-  removeEventListener() {},
-  dispatchEvent() {},
+  addEventListener(type, listener) {
+    const listeners = windowListeners.get(type) ?? new Set();
+    listeners.add(listener);
+    windowListeners.set(type, listeners);
+  },
+  removeEventListener(type, listener) {
+    windowListeners.get(type)?.delete(listener);
+  },
+  dispatchEvent(event) {
+    windowListeners.get(event.type)?.forEach((listener) => listener(event));
+  },
 };
 
 const {
   createAccountabilityHistoryStore,
+  createAccountabilityOverviewStore,
   createAccountabilityStore,
   getAccountabilityViolationId,
 } = require("../lib/local-accountability.ts");
@@ -110,6 +120,13 @@ let result = reconcile([session({ startedAt: iso("09:10") })]);
 assert.equal(result.day.violations.length, 1);
 assert.equal(result.day.violations[0].type, "started_late");
 assert.match(result.day.violations[0].details, /Late By: 10m/);
+assert.equal(result.day.violations[0].sessionId, `${DATE}:skill_mastery`);
+assert.equal(result.day.violations[0].status, "pending");
+assert.equal(result.day.violations[0].completedAt, null);
+assert.equal(
+  result.day.violations[0].pageInstruction,
+  "Write one full page about this violation."
+);
 
 // Test 3: on time and distracted.
 reset();
@@ -148,7 +165,7 @@ assert.equal(result.day.violations.length, 1);
 assert.equal(result.day.violations[0].type, "missed_session");
 assert.match(
   result.day.violations[0].pageInstruction,
-  /I missed my Skill Mastery session today/
+  /Write one full page about this violation/
 );
 
 // Test 6: missed + another late + another distracted creates three pages.
@@ -200,13 +217,14 @@ result = reconcile([failingSession]);
 assert.equal(result.day.violations.length, 2);
 assert.equal(new Set(result.day.violations.map(({ id }) => id)).size, 2);
 
-// Completion changes punishment state without changing violations.
+// Completion stores an explicit status and timestamp without changing violations.
 const completedId = getAccountabilityViolationId(
   DATE,
   "skill_mastery",
   "started_late"
 );
-result.store.setPageCompleted(completedId, true);
+const completionTime = casablancaWallTimeToDate(DATE, "12:30");
+result.store.markCompleted(completedId, completionTime);
 result.store.reconcile(
   [failingSession],
   casablancaWallTimeToDate(DATE, "12:00")
@@ -214,9 +232,38 @@ result.store.reconcile(
 const completedViolations = result.store.getSnapshot().violations;
 assert.equal(completedViolations.length, 2);
 assert.equal(
-  completedViolations.filter(({ pageCompleted }) => pageCompleted).length,
+  completedViolations.filter(({ status }) => status === "completed").length,
   1
 );
+assert.equal(
+  completedViolations.find(({ id }) => id === completedId).completedAt,
+  completionTime.toISOString()
+);
+const overviewStore = createAccountabilityOverviewStore();
+let overviewNotifications = 0;
+const unsubscribeOverview = overviewStore.subscribe(() => {
+  overviewNotifications += 1;
+});
+assert.equal(overviewStore.getSnapshot(), 1);
+const pendingId = getAccountabilityViolationId(
+  DATE,
+  "skill_mastery",
+  "distracted"
+);
+result.store.markCompleted(
+  pendingId,
+  casablancaWallTimeToDate(DATE, "12:35")
+);
+assert.ok(
+  overviewNotifications > 0,
+  "Pending-count subscribers are notified immediately"
+);
+assert.equal(
+  overviewStore.getSnapshot(),
+  0,
+  "The pending badge count disappears after every item is completed"
+);
+unsubscribeOverview();
 
 // Legacy late-start and missed-session records remain valid.
 reset();
@@ -254,7 +301,38 @@ const history = createAccountabilityHistoryStore(DATE).getSnapshot();
 assert.equal(history.length, 1);
 assert.equal(history[0].violations.length, 2);
 assert.equal(history[0].violations[0].type, "started_late");
-assert.equal(history[0].violations[0].pageCompleted, true);
+assert.equal(history[0].violations[0].status, "completed");
+assert.equal(
+  history[0].violations[0].completedAt,
+  `${legacyDate}T08:10:00.000Z`
+);
 assert.equal(history[0].violations[1].type, "missed_session");
+assert.equal(history[0].violations[1].status, "pending");
+
+// Reopening the app later can reconcile a definitively missed historical day.
+const olderDate = "2026-08-09";
+const olderStore = createAccountabilityStore(olderDate);
+const reopenedAt = casablancaWallTimeToDate(DATE, "12:00");
+olderStore.activate(reopenedAt);
+olderStore.reconcile(
+  [
+    {
+      ...session(),
+      id: `${olderDate}:skill_mastery`,
+      date: olderDate,
+      startedAt: null,
+      status: "missed",
+      distracted: null,
+    },
+  ],
+  reopenedAt
+);
+assert.equal(olderStore.getSnapshot().violations.length, 1);
+assert.equal(olderStore.getSnapshot().violations[0].status, "pending");
+assert.equal(
+  createAccountabilityOverviewStore().getSnapshot(),
+  2,
+  "Pending counts include unresolved historical accountability"
+);
 
 console.log("Accountability verification: 8 core rules passed.");

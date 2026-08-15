@@ -51,12 +51,16 @@ const {
   evaluateDistractionRule,
   evaluateStartTimeRule,
   finalizeRunningTaskAtSessionEnd,
+  getCurrentScheduledSessionType,
+  getNextScheduledSessionStart,
   getSessionExecutionResult,
+  getSessionLabel,
   getSessionTimeValidationError,
   getTrackedTaskTime,
   pauseSessionTask,
   resolveExpiredSession,
   reopenCompletedSession,
+  reopenSessionTask,
   startSessionTask,
   undoSessionStart,
 } = require("../lib/session.ts");
@@ -91,6 +95,8 @@ function task({
   status = "pending",
   start = null,
   finish = null,
+  outcome = "Produce the intended test result",
+  expectedDurationMinutes = 30,
 }) {
   const createdAt = toIso(date, "08:00");
   const startedAt = start === null ? null : toIso(date, start);
@@ -98,6 +104,10 @@ function task({
   return {
     id,
     title: `Task ${id}`,
+    outcome,
+    firstAction: "Begin the first test action",
+    category: "creative_mastery",
+    expectedDurationMinutes,
     status,
     startedAt,
     finishedAt,
@@ -147,8 +157,81 @@ function run() {
     SESSION_SCHEDULE.client_acquisition.plannedFinish;
 
   try {
+    assert.equal(getSessionLabel("skill_mastery"), "Session 1");
+    assert.equal(getSessionLabel("client_acquisition"), "Session 2");
+    assert.equal(getSessionLabel("execution"), "Session 3");
+
+    const scheduleDate = "2026-08-10";
+    const scheduledSessions = [
+      session({ date: scheduleDate, sessionType: "skill_mastery" }),
+      session({ date: scheduleDate, sessionType: "client_acquisition" }),
+      session({ date: scheduleDate, sessionType: "execution" }),
+    ];
+
     SESSION_SCHEDULE.skill_mastery.plannedFinish = "11:00";
     SESSION_SCHEDULE.client_acquisition.plannedFinish = "16:00";
+
+    assert.equal(
+      getCurrentScheduledSessionType(
+        scheduledSessions,
+        casablancaWallTimeToDate(scheduleDate, "09:00")
+      ),
+      "skill_mastery"
+    );
+    assert.equal(
+      getCurrentScheduledSessionType(
+        scheduledSessions,
+        casablancaWallTimeToDate(scheduleDate, "11:00")
+      ),
+      null,
+      "The official end is outside the session window"
+    );
+    assert.equal(
+      getCurrentScheduledSessionType(
+        scheduledSessions,
+        casablancaWallTimeToDate(scheduleDate, "14:00")
+      ),
+      "client_acquisition"
+    );
+    assert.equal(
+      getCurrentScheduledSessionType(
+        scheduledSessions,
+        casablancaWallTimeToDate(scheduleDate, "16:30")
+      ),
+      null,
+      "No session is forced between scheduled windows"
+    );
+    assert.equal(
+      getCurrentScheduledSessionType(
+        scheduledSessions,
+        casablancaWallTimeToDate(scheduleDate, "18:00")
+      ),
+      "execution"
+    );
+    assert.equal(
+      getCurrentScheduledSessionType(
+        scheduledSessions,
+        casablancaWallTimeToDate("2026-08-11", "09:30")
+      ),
+      null,
+      "Session selection is date-aware"
+    );
+    assert.equal(
+      getNextScheduledSessionStart(
+        scheduledSessions,
+        casablancaWallTimeToDate(scheduleDate, "13:30")
+      )?.toISOString(),
+      toIso(scheduleDate, "14:00"),
+      "Manual inspection expires when the next session begins"
+    );
+    assert.equal(
+      getNextScheduledSessionStart(
+        scheduledSessions,
+        casablancaWallTimeToDate(scheduleDate, "18:00")
+      ),
+      null,
+      "The final session has no same-day automatic successor"
+    );
 
     const date = "2026-08-10";
     const afterSkillCutoff = casablancaWallTimeToDate(date, "11:30");
@@ -283,6 +366,28 @@ function run() {
       0,
       "A running session without an active task records no Deep Work"
     );
+    const unclearSession = session({
+      date,
+      start: "09:00",
+      tasks: [
+        task({
+          id: "unclear",
+          date,
+          outcome: null,
+          expectedDurationMinutes: null,
+        }),
+      ],
+    });
+    const unclearStart = startSessionTask(
+      unclearSession,
+      "unclear",
+      casablancaWallTimeToDate(date, "09:15")
+    );
+    assert.equal(
+      unclearStart.error,
+      "Add an outcome and estimated time before starting this task."
+    );
+    assert.equal(unclearStart.session.tasks[0].status, "pending");
     const intervalStarted = startSessionTask(
       intervalSession,
       "focus",
@@ -376,13 +481,38 @@ function run() {
       start: "09:00",
       tasks: [
         task({ id: "auto", date, status: "running", start: "10:30" }),
+        task({
+          id: "paused",
+          date,
+          status: "paused",
+          start: "09:30",
+          finish: "10:00",
+        }),
+        task({ id: "pending", date }),
       ],
     });
     const autoEnded = resolveExpiredSession(autoEndBase, afterSkillCutoff);
     assert.equal(autoEnded.status, "completed");
-    assert.equal(autoEnded.tasks[0].status, "paused");
+    assert.equal(autoEnded.tasks[0].status, "completed");
+    assert.equal(autoEnded.tasks[0].finishedAt, toIso(date, "11:00"));
     assert.equal(autoEnded.tasks[0].workIntervals[0].endedAt, toIso(date, "11:00"));
     assert.equal(calculateTaskDuration(autoEnded.tasks[0], autoEnded), 30 * 60);
+    assert.equal(autoEnded.tasks[1].status, "paused");
+    assert.equal(autoEnded.tasks[2].status, "pending");
+    assert.strictEqual(
+      resolveExpiredSession(autoEnded, afterSkillCutoff),
+      autoEnded,
+      "Repeated cutoff reconciliation is idempotent"
+    );
+    const defensivelyCapped = finalizeRunningTaskAtSessionEnd(
+      autoEndBase,
+      afterSkillCutoff
+    );
+    assert.equal(
+      defensivelyCapped.tasks[0].finishedAt,
+      toIso(date, "11:00"),
+      "Task completion cannot exceed the official session end"
+    );
 
     const manualEndTime = casablancaWallTimeToDate(date, "10:42");
     assert.ok(manualEndTime);
@@ -401,14 +531,20 @@ function run() {
       },
       manualEndTime
     );
+    assert.equal(manuallyEnded.tasks[0].status, "completed");
+    assert.equal(manuallyEnded.tasks[0].finishedAt, toIso(date, "10:42"));
     assert.equal(manuallyEnded.tasks[0].workIntervals[0].endedAt, toIso(date, "10:42"));
     assert.equal(
       calculateTaskDuration(manuallyEnded.tasks[0], manuallyEnded),
       37 * 60
     );
     const reopenedManual = reopenCompletedSession(manuallyEnded);
-    const resumedManual = startSessionTask(
+    const reopenedManualTask = reopenSessionTask(
       reopenedManual,
+      "manual"
+    );
+    const resumedManual = startSessionTask(
+      reopenedManualTask,
       "manual",
       casablancaWallTimeToDate(date, "10:50")
     ).session;
@@ -453,9 +589,17 @@ function run() {
     const reopened = createDailySessionStore(closedDate).getSnapshot()[0];
     assert.equal(reopened.status, "completed");
     assert.equal(reopened.finishedAt, toIso(closedDate, "11:00"));
-    assert.equal(reopened.tasks[0].status, "paused");
+    assert.equal(reopened.tasks[0].status, "completed");
+    assert.equal(reopened.tasks[0].finishedAt, toIso(closedDate, "11:00"));
     assert.equal(reopened.tasks[0].workIntervals[0].endedAt, toIso(closedDate, "11:00"));
     assert.equal(calculateDeepWorkDuration(reopened), 30);
+    assert.equal(
+      reopenedStore.reconcileExpiredSessions(
+        casablancaWallTimeToDate(closedDate, "12:00")
+      ),
+      false,
+      "Persisted automatic completion is not applied twice"
+    );
 
     const legacyDate = "2026-08-13";
     storage.set(
@@ -489,8 +633,69 @@ function run() {
     assert.equal(legacy.distracted, null);
     assert.equal(legacy.distractionReason, null);
     assert.equal(legacy.tasks[0].status, "completed");
+    assert.equal(legacy.tasks[0].outcome, null);
+    assert.equal(legacy.tasks[0].firstAction, null);
+    assert.equal(legacy.tasks[0].expectedDurationMinutes, null);
     assert.equal(legacy.tasks[0].startedAt, null);
     assert.equal(calculateTaskDuration(legacy.tasks[0], legacy), 0);
+
+    const projectMigrationDate = "2026-08-12";
+    storage.set(
+      `work-session-tracker:daily-sessions:${projectMigrationDate}`,
+      JSON.stringify({
+        version: 6,
+        sessions: [
+          {
+            id: `${projectMigrationDate}:skill_mastery`,
+            sessionType: "skill_mastery",
+            status: "upcoming",
+            projectName: "MyBeauty Creative",
+            projectStage: "script",
+            projectDeadline: "2026-08-17",
+            date: projectMigrationDate,
+            tasks: [
+              {
+                id: "session-context-task",
+                title: "Write hooks",
+                outcome: "Produce five hooks",
+                firstAction: null,
+                category: "business_operations",
+                expectedDurationMinutes: 45,
+                status: "pending",
+                createdAt: toIso(projectMigrationDate, "08:00"),
+              },
+              {
+                id: "task-context-task",
+                title: "Deliver assets",
+                outcome: "Send final assets",
+                firstAction: null,
+                projectName: "Second Project",
+                projectStage: "delivered",
+                category: "client_execution",
+                expectedDurationMinutes: 30,
+                status: "pending",
+                createdAt: toIso(projectMigrationDate, "08:05"),
+              },
+            ],
+          },
+        ],
+      })
+    );
+    const migratedProject = createDailySessionStore(
+      projectMigrationDate
+    ).getSnapshot()[0];
+    assert.equal(
+      Object.hasOwn(migratedProject, "projectName"),
+      false,
+      "legacy session project data is not carried into the task system"
+    );
+    assert.equal(migratedProject.tasks[0].category, "business_operations");
+    for (const task of migratedProject.tasks) {
+      assert.equal(Object.hasOwn(task, "projectName"), false);
+      assert.equal(Object.hasOwn(task, "projectStage"), false);
+      assert.equal(Object.hasOwn(task, "originalProjectStage"), false);
+      assert.equal(Object.hasOwn(task, "projectDeadline"), false);
+    }
 
     const afternoon = session({
       date,

@@ -5,13 +5,17 @@ import {
   type SessionTaskStatus,
   type SessionTaskWorkInterval,
   type SessionType,
+  type TaskCategory,
+  DEFAULT_TASK_CATEGORY,
+  LEGACY_TASK_CATEGORIES,
+  TASK_CATEGORIES,
   SESSION_TYPES,
 } from "@/types/session";
 import { resolveExpiredSessions } from "@/lib/session";
 
 const STORAGE_KEY_PREFIX = "work-session-tracker:daily-sessions:";
-const STORAGE_VERSION = 3;
-const LEGACY_STORAGE_VERSIONS = new Set([1, 2]);
+const STORAGE_VERSION = 8;
+const LEGACY_STORAGE_VERSIONS = new Set([1, 2, 3, 4, 5, 6, 7]);
 const LOCAL_SESSIONS_CHANGED_EVENT =
   "work-session-tracker:local-sessions-changed";
 const SESSION_STATUSES = new Set<SessionStatus>([
@@ -27,7 +31,10 @@ const TASK_STATUSES = new Set<SessionTaskStatus>([
   "paused",
   "completed",
 ]);
-
+const TASK_CATEGORY_VALUES = new Set<TaskCategory>([
+  ...TASK_CATEGORIES,
+  ...LEGACY_TASK_CATEGORIES,
+]);
 interface StoredDailySessions {
   version: typeof STORAGE_VERSION;
   sessions: Session[];
@@ -100,17 +107,30 @@ export function createDailySessionStore(date: string): DailySessionStore {
     }
   }
 
+  function handleLocalSessionsChanged() {
+    cachedRaw = undefined;
+    emitChange();
+  }
+
   return {
     getSnapshot,
     getServerSnapshot,
     subscribe(listener) {
       listeners.add(listener);
       window.addEventListener("storage", handleStorage);
+      window.addEventListener(
+        LOCAL_SESSIONS_CHANGED_EVENT,
+        handleLocalSessionsChanged
+      );
 
       return () => {
         listeners.delete(listener);
         if (listeners.size === 0) {
           window.removeEventListener("storage", handleStorage);
+          window.removeEventListener(
+            LOCAL_SESSIONS_CHANGED_EVENT,
+            handleLocalSessionsChanged
+          );
         }
       };
     },
@@ -381,6 +401,14 @@ function normalizeTask(value: unknown): SessionTask[] {
     {
       id: value.id,
       title: value.title,
+      outcome: nullableTrimmedString(value.outcome),
+      firstAction: nullableTrimmedString(value.firstAction),
+      category: isTaskCategory(value.category)
+        ? value.category
+        : DEFAULT_TASK_CATEGORY,
+      expectedDurationMinutes: normalizeExpectedDuration(
+        value.expectedDurationMinutes
+      ),
       status,
       startedAt,
       finishedAt,
@@ -507,6 +535,12 @@ function nullableString(value: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
 
+function nullableTrimmedString(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
 function nullableClockTime(value: unknown): string | null {
   if (typeof value !== "string") return null;
 
@@ -523,6 +557,21 @@ function isSessionStatus(value: unknown): value is SessionStatus {
 
 function isTaskStatus(value: unknown): value is SessionTaskStatus {
   return typeof value === "string" && TASK_STATUSES.has(value as SessionTaskStatus);
+}
+
+function isTaskCategory(value: unknown): value is TaskCategory {
+  return (
+    typeof value === "string" &&
+    TASK_CATEGORY_VALUES.has(value as TaskCategory)
+  );
+}
+
+function normalizeExpectedDuration(value: unknown): number | null {
+  return typeof value === "number" &&
+    Number.isFinite(value) &&
+    value > 0
+    ? Math.round(value)
+    : null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
